@@ -23,7 +23,7 @@ MVP-A 的代码/非 live 主体已经基本齐全；剩余关键问题集中在*
 | FR | 要求 | 当前状态 | 证据 / 剩余项 |
 |---|---|---|---|
 | FR-01 | Package discovery | **PASS (non-live)** | `PackageLayout.discover()` 要求 `acad.exe`、ACAOE/CHS、reg1/2/3、配置、两个 LSP、`0加载应用程序`；缺失输入有测试。 |
-| FR-02 | Status / preflight | **PASS (non-live)** | Windows/admin/.NET、autoload chain 已实现；本轮补上 **reg2 版本无法解析时 fail-fast**，不再静默默认 R24.3；CLI 会干净返回 `ERROR` 而不是 traceback。 |
+| FR-02 | Status / preflight | **PASS (non-live)** | Windows/admin/.NET、autoload chain 已实现；reg2 版本门禁只接受**活动 HKLM Autodesk AutoCAD 根**下唯一的 `R24.3`，无法解析、其他版本、deleted-only 或无关 registry root 均 fail-fast；CLI 会干净返回 `ERROR` 而不是 traceback。 |
 | FR-03 | AutoCAD core registry | **CANDIDATE / LIVE-BLOCKED** | reg1 + reg2 + 显式 reg3 Core allowlist；整份 reg3/regedge/vba/unreg 被排除。`AutoCAD.Application` 有真实缺口证据；其余候选组尚待专用环境验证充分性/必要性。 |
 | FR-04 | Path rebasing | **PASS (non-live)** | structured rebasing + unresolved legacy audit。现包模板存在 `D:\00`、旧用户、`ADMINI~1/PROGRA~` 痕迹，但当前最终 plan 中这些已全部为 0 残留。 |
 | FR-05 | CHS Junction | **PASS (non-live)** | AppData + LocalAppData 两个 `chs` → 包内 CHS；Fake + Windows temp junction 测试通过；冲突目录/Junction fail-closed。 |
@@ -48,10 +48,11 @@ MVP-A 的代码/非 live 主体已经基本齐全；剩余关键问题集中在*
 **修复**：
 
 - 无法从 `reg2.dli` key 解析版本时抛 `PackageError`；
+- 版本证据必须来自活动的 `HKEY_LOCAL_MACHINE\\SOFTWARE\\Autodesk\\AutoCAD\\...` 产品树，不能由其他 hive/vendor 下碰巧含 `\\AutoCAD\\R24.3` 的键满足；
 - CLI 在 plan/install/diff 路径统一捕获 `PackageError`，输出明确 `ERROR` 并返回 2；
 - 增加负向回归测试。
 
-当前全量：**37 passed**。
+当前全量：**38 passed**。
 
 ---
 

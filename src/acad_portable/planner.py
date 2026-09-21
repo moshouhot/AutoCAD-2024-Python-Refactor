@@ -289,8 +289,11 @@ class InstallPlanner:
     def _versions_from_keys(reg2: RegistryDocument) -> set[str]:
         match_re = re.compile(r"\\AutoCAD\\(?P<version>R\d+\.\d+)(?:\\|$)", re.IGNORECASE)
         versions: set[str] = set()
+        expected_root = (HKLM_AUTOCAD + "\\").casefold()
         for section in reg2.sections:
             if section.deleted:
+                continue
+            if not section.key.casefold().startswith(expected_root):
                 continue
             match = match_re.search(section.key)
             if match:
