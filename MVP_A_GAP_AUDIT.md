@@ -51,7 +51,7 @@ MVP-A 的代码/非 live 主体已经基本齐全；剩余关键问题集中在*
 - CLI 在 plan/install/diff 路径统一捕获 `PackageError`，输出明确 `ERROR` 并返回 2；
 - 增加负向回归测试。
 
-当前全量：**33 passed**。
+当前全量：**36 passed**。
 
 ---
 

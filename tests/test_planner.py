@@ -190,3 +190,23 @@ def test_planner_refuses_unparseable_registry_version(tmp_path: Path) -> None:
     with pytest.raises(PackageError, match="registry version"):
         InstallPlanner(layout).build()
 
+
+def test_planner_refuses_other_active_autocad_version(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    text = layout.reg2.read_text(encoding="utf-16")
+    layout.reg2.write_text(text.replace(r"\AutoCAD\R24.3", r"\AutoCAD\R25.0"), encoding="utf-16")
+
+    with pytest.raises(PackageError, match=r"R25\.0.*expected R24\.3"):
+        InstallPlanner(layout).build()
+
+
+def test_planner_ignores_deleted_registry_version_sections(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    text = layout.reg2.read_text(encoding="utf-16")
+    deleted = REG_HEADER + r'''[-HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R25.0]
+'''
+    layout.reg2.write_text(deleted + text.removeprefix(REG_HEADER), encoding="utf-16")
+
+    plan = InstallPlanner(layout).build()
+    assert plan.metadata["version"] == "R24.3"
+
