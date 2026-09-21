@@ -40,7 +40,7 @@
 
 ## E. Non-live regression
 
-- [x] 当前全量 pytest PASS（21 passed）。
+- [x] 当前全量 pytest PASS（24 passed）。
 - [x] 所有 Phase 1 静态分析工具可重复运行。
 - [ ] `git status` 只含预期源码/文档变化（提交后复核）。
 - [x] 本轮未执行真实 CMD 安装器。
@@ -54,6 +54,9 @@
 - [x] shortcut 覆盖前保存原始字节；uninstall 只在当前文件仍等于本工具写入版本时恢复/删除。
 - [x] registry 写入前记录原值；重复 install 不覆盖最初 before-state。
 - [x] uninstall 遇到安装后外部修改会保留外部值并报告 conflict。
+- [x] Windows 临时目录实测：真实 Junction 创建/读取/移除 PASS。
+- [x] Windows 临时目录实测：真实 `.lnk` 创建 PASS。
+- [x] Windows 临时目录实测：dangling Junction 被识别为已有 reparse path 并 fail-closed。
 - [ ] 真实 Windows `--apply` 尚未执行。
 
 ### 当前真实包 non-live 证据

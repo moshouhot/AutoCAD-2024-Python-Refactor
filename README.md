@@ -29,6 +29,7 @@
 - [`DESIGN.md`](DESIGN.md)：Python MVP 的实现架构。
 - [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md)：从 Core CLI 到真机和 VBA 的开发顺序。
 - [`ACCEPTANCE.md`](ACCEPTANCE.md)：可观察的验收条件。
+- [`AUDIT.md`](AUDIT.md)：第三方审计入口、当前边界和重点问题。
 
 Phase 1 原则上不急着写 Python，先把旧安装器真正做了什么搞清楚。
 
