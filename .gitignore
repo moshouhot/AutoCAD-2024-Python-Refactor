@@ -1,0 +1,47 @@
+# Public repository boundary
+#
+# The local reference package contains proprietary Autodesk binaries and
+# historical installer resources. They are intentionally NOT published.
+
+AutoCAD 2024/
+使用说明/
+安装_AutoCAD.exe
+安装_AutoCAD V4 阉割版.cmd
+
+# Local-only reference / evidence areas
+reference-local/
+evidence-local/
+quarantine/
+
+# Generated / transient Python files
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.pyc
+*.pyo
+
+# Build / packaging outputs
+build/
+dist/
+*.egg-info/
+
+# Never publish vendor/runtime binary payloads from this project
+*.exe
+*.dll
+*.arx
+*.crx
+*.dbx
+*.msi
+*.cab
+*.7z
+*.rar
+*.zip
+
+# Local logs and temporary evidence
+*.log
+*.tmp
+*.bak
+
