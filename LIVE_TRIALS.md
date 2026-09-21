@@ -134,3 +134,51 @@ Trial 1 不计为产品 PASS，但它证明了：
 - 不能把它当作“完整 Core MVP 验收 PASS”的历史证据；
 - 后续不应为了补文档而重新 apply/uninstall，只需继续做尚未完成的真实 AutoCAD 功能验收。
 
+## Trial 3 — Core launch / missing registration failure
+
+在 Observed Live State 2 上进行真实 AutoCAD Core 启动验证。
+
+### 启动 1：带 autoload probe
+
+- 启动文件：本项目 `AutoCAD 2024/acad.exe`；
+- PID：16828；
+- 参数包含 `/nologo` 和 `live_autoload_probe.scr`；
+- 运行中 image path 已确认来自本项目 F: 路径；
+- 进程建立主窗口，但 probe marker 未生成；
+- 主窗口标题：`AutoCAD 错误中断`。
+
+关闭时只关闭本轮自己启动的 PID 16828，进程正常退出。
+
+### 启动 2：排除 probe 本身
+
+再次只使用 `/nologo` 启动：
+
+- PID：3588；
+- image path 仍是本项目 F: `acad.exe`；
+- 同样进入 `AutoCAD 错误中断`。
+
+因此可以排除 `live_autoload_probe.scr` 是本次失败原因。
+
+### 独立读取错误窗口正文
+
+为避免只根据窗口标题推断，使用只读 Win32 窗口文本探针重新启动并读取错误对话框。错误正文为：
+
+> 安装出现问题，AutoCAD 无法继续。  
+> 如果注册表清理软件已删除或更改了运行 AutoCAD 所需的注册表项，会出现此错误。  
+> 要恢复所需的注册表项，您需要使用 Windows“控制面板”中的“添加/删除程序”功能重新安装 AutoCAD。
+
+第三次探测 PID 31336 也只关闭该次自己启动的进程，并正常退出。
+
+Windows Application log 在对应时间段未发现标准 1000/1001 acad.exe crash 事件，因此这是 AutoCAD 自己捕获并显示的安装/注册状态错误，而不是 Windows 未处理崩溃。
+
+### 直接缺口证据
+
+当前真实注册表只读查询确认以下 reg3 中的基础 COM 注册完全不存在：
+
+- `HKCU\SOFTWARE\Classes\AutoCAD.Application.24`
+- `HKLM\SOFTWARE\Classes\CLSID\{8B4929F8-076F-4AEC-AFEE-8928747B7AE3}`
+
+而 reg3 明确把该 CLSID 的 `LocalServer32` 指向 AutoCAD `acad.exe /Automation`。
+
+结论：当前“只使用 reg1 + reg2”的 Core 注册范围不足。下一步不是整份导入 reg3，而是先补最小 `AutoCAD.Application` COM bootstrap，再重复同一启动验收。
+

@@ -28,6 +28,7 @@ def make_package(root: Path) -> PackageLayout:
         + r'''[HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\ACAD-7101:804]
 "UserPath"="C:\\Users\\Administrator\\AppData\\Roaming\\Autodesk"
 "LastRunTime"="legacy-runtime-value"
+"AutoMigrate"=dword:00000001
 
 [HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\ACAD-7101:804\MiniDump]
 "SessionStartCount"=dword:00000009
@@ -44,6 +45,25 @@ def make_package(root: Path) -> PackageLayout:
 
 [HKEY_CURRENT_USER\SOFTWARE\OtherVendor]
 "ShouldNotAppear"="x"
+''',
+        encoding="utf-16",
+    )
+    (acaoe / "reg3.dli").write_text(
+        REG_HEADER
+        + r'''[HKEY_CURRENT_USER\SOFTWARE\Classes\AutoCAD.Application]
+@="AutoCAD Application"
+
+[HKEY_CURRENT_USER\SOFTWARE\Classes\AutoCAD.Application.24\CLSID]
+@="{8B4929F8-076F-4AEC-AFEE-8928747B7AE3}"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{8B4929F8-076F-4AEC-AFEE-8928747B7AE3}\LocalServer32]
+@="D:\\00\\AutoCAD 2024\\AutoCAD 2024\\acad.exe /Automation"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\TypeLib\{AA9A2205-75AA-43AD-9138-1767F1BB5E0C}\1.0\0\win32]
+@="D:\\00\\AutoCAD 2024\\AutoCAD 2024\\Autodesk Shared\\acax24enu.tlb"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\MicrosoftEdge.Fake]
+@="must-not-enter-core"
 ''',
         encoding="utf-16",
     )
@@ -87,8 +107,19 @@ def test_planner_rebases_paths_and_allowlists_registry(tmp_path: Path) -> None:
     assert all("AssemblyMap" not in op.key for op in registry_values)
     assert all("AcadVBA" not in op.key for op in registry_values)
     assert all(op.name != "LastRunTime" for op in registry_values)
+    assert all(op.name != "AutoMigrate" for op in registry_values)
     assert all(op.name != "SessionStartCount" for op in registry_values)
     assert any(op.name == "KeepMe" for op in registry_values)
+    assert any("AutoCAD.Application" in op.key for op in registry_values)
+    assert all("MicrosoftEdge.Fake" not in op.key for op in registry_values)
+
+    com_server = next(
+        op
+        for op in registry_values
+        if "{8B4929F8-076F-4AEC-AFEE-8928747B7AE3}" in op.key
+        and op.name == ""
+    )
+    assert str(layout.acad_exe) in str(com_server.data)
 
     loader = next(op for op in registry_values if op.name == "Loader")
     assert str(layout.autocad_root) in str(loader.data)

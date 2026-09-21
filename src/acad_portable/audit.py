@@ -13,7 +13,12 @@ from .ops import (
     SetRegistryValue,
     WriteInstallState,
 )
-from .planner import HKCU_AUTOCAD, HKLM_AUTOCAD, InstallPlan
+from .planner import (
+    AUTOCAD_APPLICATION_COM_PREFIXES,
+    HKCU_AUTOCAD,
+    HKLM_AUTOCAD,
+    InstallPlan,
+)
 
 
 @dataclass(frozen=True)
@@ -24,7 +29,11 @@ class PlanFinding:
 
 def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFinding, ...]:
     findings: list[PlanFinding] = []
-    allowed_roots = (HKCU_AUTOCAD.casefold(), HKLM_AUTOCAD.casefold())
+    allowed_roots = (
+        HKCU_AUTOCAD.casefold(),
+        HKLM_AUTOCAD.casefold(),
+        *(prefix.casefold() for prefix in AUTOCAD_APPLICATION_COM_PREFIXES),
+    )
     supported_registry_kinds = {"sz", "expand_sz", "dword"}
 
     for warning in plan.warnings:

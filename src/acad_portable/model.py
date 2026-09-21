@@ -16,6 +16,7 @@ class PackageLayout:
     chs: Path
     reg1: Path
     reg2: Path
+    reg3: Path
     config: Path
     acad_exe: Path
     support_lsp: Path
@@ -37,6 +38,7 @@ class PackageLayout:
             "CHS": acaoe / "CHS",
             "reg1.dli": acaoe / "reg1.dli",
             "reg2.dli": acaoe / "reg2.dli",
+            "reg3.dli": acaoe / "reg3.dli",
             "配置.txt": acaoe / "配置.txt",
             "acad2024.lsp": autocad_root / "Support" / "acad2024.lsp",
             "appload.lsp": autocad_root / "Support" / "appload.lsp",
@@ -53,6 +55,7 @@ class PackageLayout:
             chs=acaoe / "CHS",
             reg1=acaoe / "reg1.dli",
             reg2=acaoe / "reg2.dli",
+            reg3=acaoe / "reg3.dli",
             config=acaoe / "配置.txt",
             acad_exe=autocad_root / "acad.exe",
             support_lsp=autocad_root / "Support" / "acad2024.lsp",

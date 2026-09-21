@@ -16,6 +16,7 @@ def make_minimal_package(root: Path) -> Path:
         acad / "acad.exe",
         acad / "ACAOE" / "reg1.dli",
         acad / "ACAOE" / "reg2.dli",
+        acad / "ACAOE" / "reg3.dli",
         acad / "ACAOE" / "配置.txt",
         acad / "Support" / "acad2024.lsp",
         acad / "Support" / "appload.lsp",

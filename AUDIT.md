@@ -137,3 +137,29 @@ python -m pytest -q
 - shortcut existing = 3
 
 这条经验应继续用于后续最小化：凡是从抓包模板进入 plan 的值，都要区分“安装状态”与“程序运行/用户活动产生的状态”。
+
+## 7. 主审计补充：reg1/reg2 不足以启动 AutoCAD
+
+真实启动验证已经证明：当前 reg1/reg2 Core plan 虽然静态 audit 和 live diff 都可为零，但 AutoCAD 仍会显示 `AutoCAD 错误中断`，正文明确指出“运行 AutoCAD 所需的注册表项”缺失或改变。
+
+这说明：
+
+> “计划与我们定义的状态一致”不等于“产品运行所需状态完整”。
+
+只读检查进一步确认 `reg3.dli` 中的 `AutoCAD.Application` ProgID / CLSID 在当前机器完全缺失。
+
+第一轮补救严格限制为：
+
+- `AutoCAD.Application*` ProgID；
+- 4 个历史/当前 AutoCAD Application CLSID；
+- 它们共同引用的 AutoCAD TypeLib `{AA9A2205-75AA-43AD-9138-1767F1BB5E0C}`。
+
+不包含：
+
+- Edge / WebView2；
+- AcSign；
+- Forms / FM20 / VBA Enabler；
+- Windows Installer metadata；
+- System32 文件部署。
+
+补丁应用前：全量测试 31 passed；live diff 只计划创建 49 values / 66 keys，0 change，2 Junction 与 3 shortcut 均保持现状。

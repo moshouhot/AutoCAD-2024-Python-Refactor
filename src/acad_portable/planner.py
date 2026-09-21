@@ -22,8 +22,20 @@ from .registry import PathRebaser, RegistryDocument
 
 HKCU_AUTOCAD = r"HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD"
 HKLM_AUTOCAD = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD"
+HKCU_CLASSES = r"HKEY_CURRENT_USER\SOFTWARE\Classes"
+HKLM_CLASSES = r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes"
 HISTORICAL_USER_RE = re.compile(r"(?i)[A-Z]:\\Users\\[^\\\";]+")
 AUTOCAD_MARKER = "\\autocad 2024"
+
+AUTOCAD_APPLICATION_COM_PREFIXES = (
+    rf"{HKCU_CLASSES}\AutoCAD.Application",
+    rf"{HKLM_CLASSES}\AutoCAD.Application.24",
+    rf"{HKLM_CLASSES}\CLSID\{{8B4929F8-076F-4AEC-AFEE-8928747B7AE3}}",
+    rf"{HKLM_CLASSES}\CLSID\{{AA46BA8A-9825-40FD-8493-0BA3C4D5CEB5}}",
+    rf"{HKLM_CLASSES}\CLSID\{{169B5B8E-E315-41C7-9574-66FC7E530D10}}",
+    rf"{HKLM_CLASSES}\CLSID\{{AF18D91C-A699-4578-ADC6-972F3BA007F0}}",
+    rf"{HKLM_CLASSES}\TypeLib\{{AA9A2205-75AA-43AD-9138-1767F1BB5E0C}}",
+)
 
 
 @dataclass(frozen=True)
@@ -67,6 +79,7 @@ class InstallPlanner:
         config = FeatureConfig.load(self.layout.config)
         reg1 = RegistryDocument.load(self.layout.reg1)
         reg2 = RegistryDocument.load(self.layout.reg2)
+        reg3 = RegistryDocument.load(self.layout.reg3)
         acad_location = reg2.first_string("AcadLocation")
         product_name = reg2.first_string("ProductNameGlob") or "AutoCAD 2024"
 
@@ -78,6 +91,7 @@ class InstallPlanner:
         warnings: list[str] = []
         operations.extend(self._registry_ops(reg1, HKCU_AUTOCAD, rebaser, warnings, source="reg1"))
         operations.extend(self._registry_ops(reg2, HKLM_AUTOCAD, rebaser, warnings, source="reg2"))
+        operations.extend(self._application_com_ops(reg3, rebaser, warnings))
 
         local_product = self.folders.local_appdata / "Autodesk" / product_name / version
         roaming_product = self.folders.appdata / "Autodesk" / product_name / version
@@ -121,6 +135,31 @@ class InstallPlanner:
                 "desktop": str(self.folders.desktop),
             },
         )
+
+    def _application_com_ops(
+        self,
+        document: RegistryDocument,
+        rebaser: PathRebaser,
+        warnings: list[str],
+    ) -> list[Operation]:
+        ops: list[Operation] = []
+        prefixes = tuple(prefix.casefold() for prefix in AUTOCAD_APPLICATION_COM_PREFIXES)
+        for section in document.sections:
+            if section.deleted or not section.key.casefold().startswith(prefixes):
+                continue
+            ops.append(EnsureRegistryKey(section.key))
+            for value in section.values:
+                if value.kind == "delete":
+                    continue
+                data = value.data
+                if value.kind in {"sz", "expand_sz"}:
+                    data = rebaser.apply(str(value.data))
+                    if self._contains_historical_package_path(str(data), rebaser):
+                        warnings.append(
+                            f"Unresolved legacy COM path: {section.key} [{value.name}] -> {data}"
+                        )
+                ops.append(SetRegistryValue(section.key, value.name, value.kind, data))
+        return ops
 
     def _registry_ops(
         self,
@@ -255,7 +294,7 @@ class InstallPlanner:
             return False
         lowered_key = key.casefold()
         lowered_name = name.casefold()
-        if lowered_name == "lastruntime":
+        if lowered_name in {"lastruntime", "automigrate"}:
             return True
         if "\\minidump" in lowered_key and lowered_name == "sessionstartcount":
             return True
