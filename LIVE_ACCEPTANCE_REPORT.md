@@ -106,13 +106,21 @@ Post-uninstall:
 - plan diff returned to the same baseline-like `1 same / 8655 create / 2880 keys_create`;
 - HKCU retained **36 keys / 80 values** written by AutoCAD runtime and external ApplicationPlugins (GPU identity, `Loaded`, external `Applications`, profile/runtime state). These were not owned by the Python journal and were intentionally preserved by owned uninstall.
 
-## Verdict before third-party review
+## Final verdict
 
-`MVP-A CORE LIVE FUNCTIONAL PASS`
+`MVP-A CORE CLOSED`
 
-Not yet claimed:
+Final third-party review:
 
-- final third-party source/evidence audit for this branch;
+- PR #2 final reviewed commit: `36bafb0`
+- CI: Windows 3.11/3.14 + Ubuntu 3.11/3.14 PASS
+- CodeQL: PASS
+- Sourcery: final review reports no new finding
+- Codex: `Didn't find any major issues.`
+- merged to `main`: `23f1075a4e1bbd0cde0ce88e35772adf2b69c4ef`
+
+Still not claimed:
+
 - per-group minimality proof for every existing selected reg3 Core candidate;
 - separate direct-click test of the desktop shortcut;
 - VBA (MVP-B).

@@ -118,11 +118,18 @@
 
 ## P7 — Core 审计收口
 
-状态：**待执行**。
+状态：**完成**。
 
-公开 PR + Codex / Sourcery / CI / CodeQL 第三方审计。
+PR #2 已完成最终 Core 审计并合并到 `main`：
 
-修复 Core 问题后锁定 MVP-A。
+- final reviewed SHA：`36bafb0`；
+- CI：Windows 3.11/3.14 + Ubuntu 3.11/3.14 全部 PASS；
+- CodeQL：PASS；
+- Sourcery：最终 review 无新 finding；
+- Codex：`Didn't find any major issues`；
+- merge commit：`23f1075a4e1bbd0cde0ce88e35772adf2b69c4ef`。
+
+MVP-A Core 至此锁定；后续若继续工作，进入 MVP-B / 最小化优化，不再把它们视为 MVP-A blocker。
 
 ## P8 — VBA
 
