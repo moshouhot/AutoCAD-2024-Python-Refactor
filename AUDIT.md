@@ -59,7 +59,7 @@ python -m pytest -q
 
 当前真实包只读/非 live 基线：
 
-- plan operations：**11,554**
+- plan operations：**11,559**
 - plan warnings：0
 - independent plan audit findings：0
 - FakeWindows 两次 apply：幂等
@@ -107,21 +107,18 @@ python -m pytest -q
 - Windows 临时目录集成；
 - 后续真实 AutoCAD GUI / LSP 验收。
 
-## 5. 尚未完成
+## 5. 当前 live 状态与尚未完成
 
-当前不能宣称产品完成：
+旧 D:/E:/F: 漂移状态是历史证据，不再代表最终候选。最终候选 `a46c33b` 已在 clean-host 环境重新完成：fresh install、真实 GUI 启动、COM 命令、autoload、repeat install、owned uninstall。
 
-- 历史上已经出现过 Core live apply，但成功执行的完整 provenance 不全，且当前 live registry 已发生大规模后续漂移；
-- 尚未取得一个可作为最终证据的、稳定且单一来源的 F: Core 真机基线；
-- 真实 AutoCAD 启动曾进入“AutoCAD 错误中断”，后续补了 COM/core registration 候选层，但尚未在干净基线上完成重新验收；
-- 尚未验证 `0加载应用程序` 的真实启动时加载；
+仍未完成：
+
+- desktop shortcut 的**直接点击启动**未单独作为一项执行；shortcut 创建/ownership 和目标契约已有 non-live + journal 证据；
+- `DwgCommon / Drawing Check / Hardcopy / ObjectDBX` 是否每一组都属于“最小必要集合”未逐组做删减实验；
 - VBA 属于后续 MVP-B；
-- 公开 GitHub 仓库、CI、CodeQL 已建立并通过；但这只证明当前源码/测试和静态分析通过，不等价于真机产品验收。
-- 本地 Codex 独立 review 曾尝试启动，但在模型列表刷新阶段超时，未形成有效 review 结论；不能计作独立 AI 审计 PASS。
+- 本 live-acceptance 分支尚需新的公开 PR、CI、CodeQL、Sourcery、Codex 对**最终 SHA**复审。
 
-当前 live 状态详见 `CURRENT_STATE_AUDIT.md`。特别是：journal 的 8656 registry values 中已有 278 与当前系统不同，其中 267 是 F:→D: 路径漂移，所以不能把 `status=complete` 当成“最新代码已通过真机验收”。
-
-第三方审计应允许结论为 `BLOCKED` / `FAIL`，不得因为当前单元测试全绿而直接认定产品完成。
+第三方审计仍应允许结论为 `BLOCKED` / `FAIL`；不得因为 live 通过就跳过源码/证据审计。
 
 ## 6. 主审计补充：volatile registry state
 
@@ -181,3 +178,22 @@ python -m pytest -q
 这些不等于整份 `reg3.dli` 重新进入 Core，也没有引入 EdgeUpdate、Forms、AcSign Shell、Windows Installer 或 System32 写入。
 
 证据强度需要区分：`AutoCAD.Application` COM bootstrap 有直接启动失败后的缺口证据；上述 DwgCommon/Hardcopy/ObjectDBX 等是**当前候选 Core allowlist**，尚未在新的可信 live baseline 上逐组证明“每一组都必需”。第三方审计不应把它们误写成已经完成最小化证明。
+
+## 8. 主审计补充：AcadObject CLSID 是已证明启动 blocker
+
+clean-host Frida trace 捕获：
+
+`CheckCOMServerRelativePaths -> InstallUserData`
+
+访问失败：
+
+`HKCR\CLSID\{E89B39BB-5AE4-4C52-9011-B70FC663F249}\InProcServer32`
+
+`rc=2`。
+
+随后做了严格单变量 A/B：
+
+- 只存在该 CLSID（`AcadObject / axdb.dll / Apartment`）时，AutoCAD 进入 `Drawing1.dwg`，COM 命令可执行；
+- 只删除该 CLSID、其他状态不变时，立刻恢复 `AutoCAD 错误中断`。
+
+因此 planner 仅加入这个 `reg3.dli` 子树；相邻未证明 CLSID 继续排除。第三方审计应重点确认这条 allowlist 没有意外扩大。

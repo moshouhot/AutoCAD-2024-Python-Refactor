@@ -361,3 +361,127 @@ Python planner 仅把上述 CLSID subtree 加入现有 `AUTOCAD_REG3_CORE_PREFIX
 
 下一步：先提交候选，再通过 `install --apply` 让 Python ownership journal 正式接管这组新键，然后重新执行 live startup / autoload / uninstall 闭环。
 
+## Trial 6 — final candidate full live closure
+
+候选实现提交：
+
+`a46c33b` — `fix: add traced AcadObject core registration`
+
+### Non-live gate
+
+- pytest：**40 passed**；
+- plan：**11,559 operations**；
+- warnings：0；
+- audit findings：0；
+- `git diff --check`：PASS。
+
+### Ownership baseline
+
+最终循环开始时：
+
+- `.python-installer-state.json` 不存在；
+- HKLM `SOFTWARE\Autodesk\AutoCAD\R24.3` 不存在；
+- `acad.exe` 未运行；
+- plan diff：`1 same / 8655 create / 2880 keys_create`；
+- HKCU 允许保留此前 AutoCAD 运行产生的非 journal 状态，这是 owned-uninstall 设计的一部分。
+
+### Fresh install
+
+执行：
+
+`python -m acad_portable install --apply`
+
+结果：**PASS**。
+
+- actual operations = **11,558**；
+- post-install registry = **8656 same / 0 change / 0 create**；
+- Junction = **2 same**；
+- shortcut = **3 existing**；
+- journal：2880 created registry keys / 8656 values / 2 junctions / 3 shortcuts。
+
+`AcadObject` CLSID 已由 Python installer 正式创建，不再依赖临时 gate。
+
+### Real startup / command / autoload
+
+启动当前项目：
+
+`AutoCAD 2024\acad.exe /nologo`
+
+真实 PID：`180`。
+
+窗口证据：
+
+`Autodesk AutoCAD 2024 - [Drawing1.dwg]`
+
+ExecutablePath：当前 F: 项目 `AutoCAD 2024\acad.exe`。
+
+COM 命令探针：
+
+`USERR1 0 -> 12.345 -> 0`
+
+并返回 `Document=Drawing1.dwg`。
+
+Auto-load：
+
+- 在 `0加载应用程序` 放入一次性 `__mvp_a_probe.lsp`；
+- 普通启动后自动生成 `__mvp_a_autoload_marker.txt`，内容 `AUTOLOAD_OK`；
+- 测试完成后 probe 与 marker 已删除。
+
+因此 FR-09 已取得真实启动证据，不再只是静态链路。
+
+### Runtime drift
+
+一次正常 AutoCAD 启动后，read-only diff 显示：
+
+- 8607 same；
+- 48 change；
+- 1 create。
+
+变化主要是 AutoCAD 自己写入的 HKCU GPU/Certification 与运行态值；Junction/shortcut 均保持正确。这些变化不是新的启动 blocker。
+
+### Repeat install
+
+关闭 AutoCAD 后再次执行 `install --apply`：**PASS**。
+
+随后 diff 重新回到：
+
+- registry **8656 same / 0 change / 0 create**；
+- Junction 2 same；
+- shortcut 3 existing。
+
+journal cardinality 保持：
+
+- created registry keys = 2880；
+- registry values = 8656；
+- junctions = 2；
+- shortcuts = 3。
+
+### Owned uninstall
+
+执行：
+
+`python -m acad_portable uninstall --apply`
+
+结果：**PASS**。
+
+- registry restored = **1**；
+- registry removed = **8655**；
+- shortcuts restored = **2**；
+- shortcuts removed = **1**；
+- junctions removed = **2**；
+- conflicts = **0**。
+
+卸载后：
+
+- installer state 不存在；
+- `AcadObject` CLSID 不存在；
+- HKLM R24.3 不存在；
+- plan diff 回到同一 baseline：`1 same / 8655 create / 2880 keys_create`；
+- HKCU 保留 36 keys / 80 values，内容为 AutoCAD runtime/GPU、`Loaded`、外部 ApplicationPlugins、用户 profile 等非 journal 状态，按 owned-uninstall 契约有意保留。
+
+### Trial 6 结论
+
+> **MVP-A Core live functional closure = PASS.**
+
+当前不再存在已知 Core 启动 blocker。剩余工作是最终分支第三方审计，以及后续是否继续做 allowlist 最小化；VBA 属于 MVP-B。
+
