@@ -22,7 +22,13 @@
 本阶段主要产物：
 
 - [`CMD_FUNCTIONAL_SPEC.md`](CMD_FUNCTIONAL_SPEC.md)：从产品功能角度解释旧 CMD。
-- 后续 `PYTHON_FUNCTIONAL_REQUIREMENTS.md`：在理解 CMD 后形成新的 Python 产品规范。
+- [`REGISTRY_TEMPLATE_SPEC.md`](REGISTRY_TEMPLATE_SPEC.md)：把 `.dli` 注册模板拆成产品职责，而不是整体照搬。
+- [`PAYLOAD_ARCHIVE_SPEC.md`](PAYLOAD_ARCHIVE_SPEC.md)：解释旧归档中的真实文件职责和交叉依赖。
+- [`RUNTIME_FEATURE_SPEC.md`](RUNTIME_FEATURE_SPEC.md)：把 Junction、CHS、快捷方式、自动加载等运行时职责写成明确契约。
+- [`PYTHON_FUNCTIONAL_REQUIREMENTS.md`](PYTHON_FUNCTIONAL_REQUIREMENTS.md)：新的 Python 产品规范，后续实现以此为准。
+- [`DESIGN.md`](DESIGN.md)：Python MVP 的实现架构。
+- [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md)：从 Core CLI 到真机和 VBA 的开发顺序。
+- [`ACCEPTANCE.md`](ACCEPTANCE.md)：可观察的验收条件。
 
 Phase 1 原则上不急着写 Python，先把旧安装器真正做了什么搞清楚。
 

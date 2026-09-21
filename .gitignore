@@ -12,6 +12,7 @@ AutoCAD 2024/
 reference-local/
 evidence-local/
 quarantine/
+analysis/
 
 # Generated / transient Python files
 __pycache__/
