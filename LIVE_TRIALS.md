@@ -294,3 +294,70 @@ Win32 只读窗口探针确认：
 
 本地 AI 任务规范见 `LOCAL_AI_LIVE_DEBUG_TASK.md`。
 
+## Trial 5 — AcadObject CLSID 单变量 A/B 因果验证
+
+在 Trial 4 的 clean install 基础上继续定位“AutoCAD 错误中断”。
+
+### 启动 trace
+
+Frida 注册表 trace 捕获到 `acad.exe` 在启动路径：
+
+`CheckCOMServerRelativePaths -> InstallUserData`
+
+明确访问：
+
+`HKCR\CLSID\{E89B39BB-5AE4-4C52-9011-B70FC663F249}\InProcServer32`
+
+并返回 `rc=2`（key/path not found）。
+
+原始证据：
+
+- `evidence-local/mvp-a-live-20260921T1642/com_trace.ndjson`
+- `evidence-local/mvp-a-live-20260921T1642/registry_trace.ndjson`
+
+对应 `reg3.dli` 官方抓取模板仅包含两个 section：
+
+- `HKLM\SOFTWARE\Classes\CLSID\{E89B39BB-5AE4-4C52-9011-B70FC663F249}` → `AcadObject`
+- `...\InProcServer32` → `axdb.dll`，`ThreadingModel=Apartment`
+
+### 单变量 A/B
+
+使用 `temp_acadobject_gate.py` 只控制这一组 CLSID，不修改其他 registry。
+
+**B（CLSID 存在）**：
+
+- 64-bit HKLM Classes 中该 CLSID 内容完整；
+- 启动当前 F: 项目 `acad.exe /nologo`；
+- 真实 PID `34936`；
+- 主窗口标题：`Autodesk AutoCAD 2024 - [Drawing1.dwg]`；
+- COM `AutoCAD.Application.24` 可获取；
+- `command_probe.ps1` 实际执行 `SETVAR USERR1 12.345`，结果 `0 -> 12.345 -> 0`；
+- 证明 AutoCAD 不仅进主界面，命令执行链也正常。
+
+**A（只删除该 CLSID）**：
+
+- gate 脚本先验证该树只能包含 `AcadObject / axdb.dll / Apartment`，随后删除；
+- 同一文件、同一其他 registry 状态重新启动；
+- 真实 PID `36564`；
+- 窗口立即恢复 `AutoCAD 错误中断`；
+- 错误正文仍为“运行 AutoCAD 所需的注册表项被删除或更改”。
+
+因此当前证据支持：
+
+> **`AcadObject` CLSID `{E89B39BB-5AE4-4C52-9011-B70FC663F249}` 是当前 MVP-A Core 启动所需的最小已证明缺口。**
+
+本轮不据此扩大到其他 CLSID/TypeLib，也不整体导入 reg3。
+
+### 候选实现
+
+Python planner 仅把上述 CLSID subtree 加入现有 `AUTOCAD_REG3_CORE_PREFIXES`；相邻未证明的 `AcadWipeout` CLSID 明确保持排除，并有负向单测。
+
+候选 non-live 结果：
+
+- pytest：40 passed；
+- plan：11,559 operations；
+- warnings：0；
+- audit findings：0。
+
+下一步：先提交候选，再通过 `install --apply` 让 Python ownership journal 正式接管这组新键，然后重新执行 live startup / autoload / uninstall 闭环。
+

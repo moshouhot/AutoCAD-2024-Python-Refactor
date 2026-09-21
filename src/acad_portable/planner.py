@@ -46,6 +46,11 @@ AUTOCAD_REG3_CORE_PREFIXES = AUTOCAD_APPLICATION_COM_PREFIXES + (
     rf"{HKLM_CLASSES}\ObjectDBX.AxDbDocument.24",
     rf"{HKLM_CLASSES}\CLSID\{{39C92898-2FBB-4629-8E1B-6968D3122EC4}}",
     rf"{HKLM_CLASSES}\TypeLib\{{39FFAA00-8623-488F-8C53-DD3B0B7A464F}}",
+    # Live startup trace: acad.exe opens this AcadObject registration from
+    # CheckCOMServerRelativePaths -> InstallUserData.  On a controlled clean
+    # baseline, leaving only this CLSID absent reproduces "AutoCAD 错误中断";
+    # adding exactly this subtree lets AutoCAD reach Drawing1.dwg.
+    rf"{HKLM_CLASSES}\CLSID\{{E89B39BB-5AE4-4C52-9011-B70FC663F249}}",
 )
 
 
