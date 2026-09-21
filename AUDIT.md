@@ -197,3 +197,24 @@ clean-host Frida trace 捕获：
 - 只删除该 CLSID、其他状态不变时，立刻恢复 `AutoCAD 错误中断`。
 
 因此 planner 仅加入这个 `reg3.dli` 子树；相邻未证明 CLSID 继续排除。第三方审计应重点确认这条 allowlist 没有意外扩大。
+
+## 9. PR #2 reviewer 加固：registry prefix 必须有键边界
+
+Sourcery 指出：裸 `startswith(prefix)` 会把 `prefix + "Extra"` 这类同前缀兄弟键误认为子树成员。
+
+修复后 planner 与 audit 共用规则：
+
+- `key == prefix`，或
+- `key` 以 `prefix + "\\"` 开头。
+
+同时把旧裸前缀隐式包含的合法 `AutoCAD.Application.24/.24.1/.24.2/.24.3` ProgID 显式列入 allowlist。
+
+回归证据：
+
+- pytest：**41 passed**；
+- plan：**11,559 operations / 0 warnings / 0 findings**；
+- 真实 `reg3.dli`：旧选择集合 = 126 sections，新选择集合 = 126 sections，**完全相同**；
+- 攻击型测试：`AcadObject GUID + Extra`、`AutoCAD.ApplicationExtra`、`AutoCAD.Application.24Extra` 均被排除；
+- audit 对同前缀伪 root 报 `REGISTRY_ROOT`。
+
+因此这是边界安全加固，不改变已经完成 live 验收的实际 Core registry 集合。

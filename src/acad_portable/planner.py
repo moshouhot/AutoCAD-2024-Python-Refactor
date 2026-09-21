@@ -20,6 +20,12 @@ from .ops import (
 from .registry import PathRebaser, RegistryDocument
 
 
+def registry_key_is_same_or_descendant(key: str, prefix: str) -> bool:
+    key_cf = key.rstrip("\\").casefold()
+    prefix_cf = prefix.rstrip("\\").casefold()
+    return key_cf == prefix_cf or key_cf.startswith(prefix_cf + "\\")
+
+
 HKCU_AUTOCAD = r"HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD"
 HKLM_AUTOCAD = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD"
 HKCU_CLASSES = r"HKEY_CURRENT_USER\SOFTWARE\Classes"
@@ -30,7 +36,11 @@ SUPPORTED_AUTOCAD_REGISTRY_VERSION = "R24.3"
 
 AUTOCAD_APPLICATION_COM_PREFIXES = (
     rf"{HKCU_CLASSES}\AutoCAD.Application",
+    rf"{HKCU_CLASSES}\AutoCAD.Application.24",
     rf"{HKLM_CLASSES}\AutoCAD.Application.24",
+    rf"{HKLM_CLASSES}\AutoCAD.Application.24.1",
+    rf"{HKLM_CLASSES}\AutoCAD.Application.24.2",
+    rf"{HKLM_CLASSES}\AutoCAD.Application.24.3",
     rf"{HKLM_CLASSES}\CLSID\{{8B4929F8-076F-4AEC-AFEE-8928747B7AE3}}",
     rf"{HKLM_CLASSES}\CLSID\{{AA46BA8A-9825-40FD-8493-0BA3C4D5CEB5}}",
     rf"{HKLM_CLASSES}\CLSID\{{169B5B8E-E315-41C7-9574-66FC7E530D10}}",
@@ -168,9 +178,11 @@ class InstallPlanner:
         warnings: list[str],
     ) -> list[Operation]:
         ops: list[Operation] = []
-        prefixes = tuple(prefix.casefold() for prefix in AUTOCAD_REG3_CORE_PREFIXES)
         for section in document.sections:
-            if section.deleted or not section.key.casefold().startswith(prefixes):
+            if section.deleted or not any(
+                registry_key_is_same_or_descendant(section.key, prefix)
+                for prefix in AUTOCAD_REG3_CORE_PREFIXES
+            ):
                 continue
             ops.append(EnsureRegistryKey(section.key))
             for value in section.values:
@@ -195,9 +207,8 @@ class InstallPlanner:
         source: str,
     ) -> list[Operation]:
         ops: list[Operation] = []
-        allowed_cf = allowed_root.casefold()
         for section in document.sections:
-            if section.deleted or not section.key.casefold().startswith(allowed_cf):
+            if section.deleted or not registry_key_is_same_or_descendant(section.key, allowed_root):
                 continue
             if self._excluded_core_registry_section(section.key, source):
                 continue

@@ -43,7 +43,7 @@
 
 ## E. Non-live regression
 
-- [x] 当前全量 pytest PASS（40 passed）。
+- [x] 当前全量 pytest PASS（41 passed）。
 - [x] 所有 Phase 1 静态分析工具可重复运行。
 - [x] GitHub CI：`d74ce5e` 在 Windows 3.11 / 3.14、Ubuntu 3.11 / 3.14 四矩阵全部 PASS（run `35570091621`）。
 - [x] GitHub CodeQL：Python analysis PASS（run `35570091637`）。
@@ -80,9 +80,9 @@
 
 旧 D:/E:/F: 混合状态已经被专用 clean-host 验收取代；历史漂移仍保留在 `CURRENT_STATE_AUDIT.md`，但不再代表当前候选状态。
 
-最终候选 `a46c33b`：
+live-tested 实现基线 `a46c33b`：
 
-- pytest：**40 passed**；
+- 当时 pytest：**40 passed**；
 - plan：**11,559 operations / 0 warnings / 0 audit findings**；
 - fresh install：**11,558 actual operations**，0 conflict；
 - install 后 diff：**8656 same / 0 change / 0 create**；
@@ -94,6 +94,13 @@
 - uninstall：registry restored=1 / removed=8655，shortcuts restored=2 / removed=1，junctions removed=2，**conflicts=0**；
 - uninstall 后 `AcadObject` CLSID 与 HKLM R24.3 均不存在，installer state 不存在；
 - HKCU 保留的 36 keys / 80 values 为 AutoCAD 运行时及外部 ApplicationPlugins 写入状态，符合 owned-uninstall 契约。
+
+PR #2 reviewer 边界加固后：
+
+- 当前 pytest：**41 passed**；
+- plan 仍为 **11,559 operations / 0 warnings / 0 findings**；
+- 旧裸前缀语义与新“exact-or-descendant”语义在真实 `reg3.dli` 上均选择 **126 sections**，集合完全相同；
+- 因此加固未改变已完成 live 验收的实际 registry plan，只阻止未来同前缀兄弟键误入 Core。
 
 ## F. MVP-A 真机验收
 

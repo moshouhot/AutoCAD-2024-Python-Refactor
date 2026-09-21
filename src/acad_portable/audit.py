@@ -19,6 +19,7 @@ from .planner import (
     HKCU_AUTOCAD,
     HKLM_AUTOCAD,
     InstallPlan,
+    registry_key_is_same_or_descendant,
 )
 
 
@@ -43,11 +44,14 @@ def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFi
     for operation in plan.operations:
         if isinstance(operation, (EnsureRegistryKey, SetRegistryValue)):
             key_cf = operation.key.casefold()
-            if not key_cf.startswith(allowed_roots):
+            if not any(
+                registry_key_is_same_or_descendant(operation.key, root)
+                for root in allowed_roots
+            ):
                 findings.append(PlanFinding("REGISTRY_ROOT", operation.key))
             if "\\applications\\acadvba" in key_cf:
                 findings.append(PlanFinding("VBA_IN_CORE", operation.key))
-            if key_cf.startswith(HKCU_AUTOCAD.casefold()) and "\\applications" in key_cf:
+            if registry_key_is_same_or_descendant(operation.key, HKCU_AUTOCAD) and "\\applications" in key_cf:
                 findings.append(PlanFinding("USER_PLUGIN_IN_CORE", operation.key))
 
         if isinstance(operation, SetRegistryValue):

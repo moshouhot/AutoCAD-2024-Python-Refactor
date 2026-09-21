@@ -6,7 +6,7 @@
 
 - branch: `mvp-a/live-acceptance`
 - implementation commit: `a46c33b` (`fix: add traced AcadObject core registration`)
-- pytest: **40 passed**
+- live-cycle pytest at `a46c33b`: **40 passed**
 - plan: **11,559 operations / 0 warnings / 0 audit findings**
 
 ## Clean ownership baseline
@@ -116,3 +116,17 @@ Not yet claimed:
 - per-group minimality proof for every existing selected reg3 Core candidate;
 - separate direct-click test of the desktop shortcut;
 - VBA (MVP-B).
+
+## Post-live reviewer hardening
+
+Sourcery PR #2 review found a prefix-boundary bug in the allowlist matcher: raw `startswith` could admit a same-prefix sibling such as `...{GUID}Extra`.
+
+The fix changes planner and audit matching to exact-key-or-descendant semantics and explicitly lists the intended versioned `AutoCAD.Application` ProgIDs.
+
+Current verification after this fix:
+
+- pytest: **41 passed**
+- plan: **11,559 operations / 0 warnings / 0 audit findings**
+- real `reg3.dli` selected sections: old semantics **126**, new semantics **126**, sets **equal**
+
+Therefore the reviewer hardening does not change the registry plan exercised by the live cycle; it only rejects future same-prefix non-descendant keys.
