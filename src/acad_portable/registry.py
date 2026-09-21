@@ -108,6 +108,8 @@ class RegistryDocument:
 
     def first_string(self, value_name: str) -> str | None:
         for section in self.sections:
+            if section.deleted:
+                continue
             for value in section.values:
                 if value.name.casefold() == value_name.casefold() and value.kind == "sz":
                     return str(value.data)

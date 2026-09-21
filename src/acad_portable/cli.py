@@ -40,21 +40,20 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         layout = PackageLayout.discover(args.root)
+        if args.command == "status":
+            return _status(layout, args.json)
+        if args.command == "plan":
+            return _plan(layout, args.json, args.full)
+        if args.command == "install":
+            return _install(layout, args.apply)
+        if args.command == "uninstall":
+            return _uninstall(layout, args.apply)
+        if args.command == "diff":
+            return _diff(layout, args.json)
+        return 2
     except PackageError as exc:
         print(f"ERROR: {exc}")
         return 2
-
-    if args.command == "status":
-        return _status(layout, args.json)
-    if args.command == "plan":
-        return _plan(layout, args.json, args.full)
-    if args.command == "install":
-        return _install(layout, args.apply)
-    if args.command == "uninstall":
-        return _uninstall(layout, args.apply)
-    if args.command == "diff":
-        return _diff(layout, args.json)
-    return 2
 
 
 def _status(layout: PackageLayout, as_json: bool) -> int:

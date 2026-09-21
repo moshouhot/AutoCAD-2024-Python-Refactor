@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import FeatureConfig
-from .model import PackageLayout
+from .model import PackageError, PackageLayout
 from .ops import (
     CreateShortcut,
     EnsureDirectory,
@@ -26,6 +26,7 @@ HKCU_CLASSES = r"HKEY_CURRENT_USER\SOFTWARE\Classes"
 HKLM_CLASSES = r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes"
 HISTORICAL_USER_RE = re.compile(r"(?i)[A-Z]:\\Users\\[^\\\";]+")
 AUTOCAD_MARKER = "\\autocad 2024"
+SUPPORTED_AUTOCAD_REGISTRY_VERSION = "R24.3"
 
 AUTOCAD_APPLICATION_COM_PREFIXES = (
     rf"{HKCU_CLASSES}\AutoCAD.Application",
@@ -93,7 +94,16 @@ class InstallPlanner:
         acad_location = reg2.first_string("AcadLocation")
         product_name = reg2.first_string("ProductNameGlob") or "AutoCAD 2024"
 
-        version = self._version_from_keys(reg2) or "R24.3"
+        versions = self._versions_from_keys(reg2)
+        if not versions:
+            raise PackageError("Cannot parse AutoCAD registry version from reg2.dli")
+        if versions != {SUPPORTED_AUTOCAD_REGISTRY_VERSION}:
+            found = ", ".join(sorted(versions))
+            raise PackageError(
+                "Unsupported AutoCAD registry version(s) in reg2.dli: "
+                f"{found}; expected {SUPPORTED_AUTOCAD_REGISTRY_VERSION}"
+            )
+        version = SUPPORTED_AUTOCAD_REGISTRY_VERSION
         mappings = self._path_mappings(reg1, reg2, acad_location)
         rebaser = PathRebaser(mappings)
 
@@ -221,6 +231,8 @@ class InstallPlanner:
         user_candidates = Counter()
         for document in (reg1, reg2):
             for section in document.sections:
+                if section.deleted:
+                    continue
                 for value in section.values:
                     if value.kind not in {"sz", "expand_sz"}:
                         continue
@@ -249,6 +261,8 @@ class InstallPlanner:
         current_cf = str(self.layout.autocad_root).casefold().rstrip("\\/")
         for document in (reg1, reg2):
             for section in document.sections:
+                if section.deleted:
+                    continue
                 for value in section.values:
                     if value.kind not in {"sz", "expand_sz"}:
                         continue
@@ -272,13 +286,19 @@ class InstallPlanner:
         return sorted(roots, key=len, reverse=True)
 
     @staticmethod
-    def _version_from_keys(reg2: RegistryDocument) -> str | None:
-        match_re = re.compile(r"\\AutoCAD\\(?P<version>R\d+\.\d+)(?:\\|$)", re.IGNORECASE)
+    def _versions_from_keys(reg2: RegistryDocument) -> set[str]:
+        match_re = re.compile(
+            rf"^{re.escape(HKLM_AUTOCAD)}\\(?P<version>R\d+\.\d+)(?:\\|$)",
+            re.IGNORECASE,
+        )
+        versions: set[str] = set()
         for section in reg2.sections:
-            match = match_re.search(section.key)
+            if section.deleted:
+                continue
+            match = match_re.match(section.key)
             if match:
-                return match.group("version")
-        return None
+                versions.add(match.group("version").upper())
+        return versions
 
     @staticmethod
     def _contains_historical_package_path(value: str, rebaser: PathRebaser) -> bool:

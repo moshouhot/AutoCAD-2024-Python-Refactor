@@ -98,7 +98,7 @@
 
 `python -m pytest -q`
 
-→ **31 passed**
+→ **39 passed**
 
 ### Plan
 

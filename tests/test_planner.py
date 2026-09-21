@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from acad_portable.model import PackageLayout
+import pytest
+
+from acad_portable.model import PackageError, PackageLayout
 from acad_portable.ops import CreateShortcut, EnsureJunction, SetRegistryValue
 from acad_portable.planner import InstallPlanner, KnownFolders
 
@@ -178,4 +180,77 @@ def test_desktop_shortcut_respects_config(tmp_path: Path) -> None:
     shortcuts = [op for op in plan.operations if isinstance(op, CreateShortcut)]
     assert len(shortcuts) == 2
     assert all(op.path.parent != folders.desktop for op in shortcuts)
+
+
+def test_planner_refuses_unparseable_registry_version(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    text = layout.reg2.read_text(encoding="utf-16")
+    layout.reg2.write_text(text.replace(r"\AutoCAD\R24.3", r"\AutoCAD\UNKNOWN"), encoding="utf-16")
+
+    with pytest.raises(PackageError, match="registry version"):
+        InstallPlanner(layout).build()
+
+
+def test_planner_refuses_other_active_autocad_version(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    text = layout.reg2.read_text(encoding="utf-16")
+    layout.reg2.write_text(text.replace(r"\AutoCAD\R24.3", r"\AutoCAD\R25.0"), encoding="utf-16")
+
+    with pytest.raises(PackageError, match=r"R25\.0.*expected R24\.3"):
+        InstallPlanner(layout).build()
+
+
+def test_planner_refuses_version_from_unrelated_registry_root(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    text = layout.reg2.read_text(encoding="utf-16")
+    text = text.replace(
+        r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R24.3",
+        r"HKEY_CURRENT_USER\SOFTWARE\OtherVendor\AutoCAD\R24.3",
+    )
+    layout.reg2.write_text(text, encoding="utf-16")
+
+    with pytest.raises(PackageError, match="Cannot parse AutoCAD registry version"):
+        InstallPlanner(layout).build()
+
+
+def test_planner_refuses_nested_fake_version_under_autocad_root(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    text = layout.reg2.read_text(encoding="utf-16")
+    text = text.replace(
+        r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R24.3",
+        r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\SomeVendor\AutoCAD\R24.3",
+    )
+    layout.reg2.write_text(text, encoding="utf-16")
+
+    with pytest.raises(PackageError, match="Cannot parse AutoCAD registry version"):
+        InstallPlanner(layout).build()
+
+
+def test_planner_ignores_deleted_registry_version_sections(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    text = layout.reg2.read_text(encoding="utf-16")
+    deleted = REG_HEADER + r'''[-HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R25.0]
+'''
+    layout.reg2.write_text(deleted + text.removeprefix(REG_HEADER), encoding="utf-16")
+
+    plan = InstallPlanner(layout).build()
+    assert plan.metadata["version"] == "R24.3"
+
+
+def test_planner_deleted_sections_do_not_influence_path_rebasing(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    reg1_text = layout.reg1.read_text(encoding="utf-16")
+    deleted = REG_HEADER + r'''[-HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\Deleted]
+"StaleUserPath"="Z:\\Users\\DeletedUser\\AppData\\Roaming\\Autodesk"
+"StaleAcadPath"="Z:\\Deleted\\AutoCAD 2024\\Support"
+'''
+    layout.reg1.write_text(deleted + reg1_text.removeprefix(REG_HEADER), encoding="utf-16")
+
+    plan = InstallPlanner(layout).build()
+
+    assert all(
+        not old.startswith(r"Z:\Users\DeletedUser")
+        and not old.startswith(r"Z:\Deleted\AutoCAD 2024")
+        for old in plan.metadata["legacy_path_prefixes"]
+    )
 

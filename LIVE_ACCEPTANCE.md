@@ -8,6 +8,21 @@
 
 `F:\Nextcloud\project\AutoCAD 2024.1.9 绿色完整版`
 
+### 测试环境原则
+
+最终 MVP-A 真机验收必须在**单独的 CAD 2024 测试 Windows 环境**执行。
+
+这里不要求“每轮做快照”。推荐维护一个长期测试环境，专门用于本项目：
+
+- 不承载需要保留的另一套 AutoCAD 2024 / R24.3 注册状态；
+- 可以长期重复 install / uninstall / 启动验证；
+- 其他 AutoCAD 大版本即使存在，也不得被本项目验收脚本主动修改；
+- 当前 D:/E:/F: 混合主机不得作为最终 PASS 环境。
+
+原因：AutoCAD 2024 的 HKLM/HKCU 产品树、CLSID/TypeLib 和 `AutoCAD.Application` COM 注册属于机器/用户级状态，同一 Windows 上多套 AutoCAD 2024 绿色实例无法靠“换目录”获得真正隔离。
+
+因此本项目采用：**一个专用环境 + 每轮只读 baseline 检查**，而不是大量快照。
+
 在执行真实安装前，必须先保存：
 
 - `git status --short`
@@ -22,6 +37,7 @@
 - plan warnings = 0；
 - audit findings = 0；
 - Windows/admin/.NET preflight PASS。
+- 当前 `R24.3` 注册状态来源明确；若已有另一套 AutoCAD 2024 指向其他 D:/E:/F: 路径，STOP，不直接覆盖。
 
 如果任何一项不满足，STOP，不要 `--apply`。
 

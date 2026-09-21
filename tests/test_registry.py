@@ -47,3 +47,18 @@ def test_path_rebaser_respects_directory_boundary() -> None:
     assert rebaser.apply(r"C:\Users\Administrator\AppData") == r"C:\Users\Administrator.DESKTOP-1\AppData"
     assert rebaser.apply(r"C:\Users\Administrator.DESKTOP-1\AppData") == r"C:\Users\Administrator.DESKTOP-1\AppData"
 
+
+def test_first_string_ignores_deleted_sections() -> None:
+    document = RegistryDocument.parse(
+        '''Windows Registry Editor Version 5.00
+
+[-HKEY_LOCAL_MACHINE\\SOFTWARE\\Autodesk\\AutoCAD\\R24.3]
+"AcadLocation"="D:\\Deleted"
+
+[HKEY_LOCAL_MACHINE\\SOFTWARE\\Autodesk\\AutoCAD\\R24.3]
+"AcadLocation"="F:\\Active"
+'''
+    )
+
+    assert document.first_string("AcadLocation") == r"F:\Active"
+
