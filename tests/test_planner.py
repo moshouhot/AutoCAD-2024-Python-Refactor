@@ -210,3 +210,21 @@ def test_planner_ignores_deleted_registry_version_sections(tmp_path: Path) -> No
     plan = InstallPlanner(layout).build()
     assert plan.metadata["version"] == "R24.3"
 
+
+def test_planner_deleted_sections_do_not_influence_path_rebasing(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    reg1_text = layout.reg1.read_text(encoding="utf-16")
+    deleted = REG_HEADER + r'''[-HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\Deleted]
+"StaleUserPath"="Z:\\Users\\DeletedUser\\AppData\\Roaming\\Autodesk"
+"StaleAcadPath"="Z:\\Deleted\\AutoCAD 2024\\Support"
+'''
+    layout.reg1.write_text(deleted + reg1_text.removeprefix(REG_HEADER), encoding="utf-16")
+
+    plan = InstallPlanner(layout).build()
+
+    assert all(
+        not old.startswith(r"Z:\Users\DeletedUser")
+        and not old.startswith(r"Z:\Deleted\AutoCAD 2024")
+        for old in plan.metadata["legacy_path_prefixes"]
+    )
+

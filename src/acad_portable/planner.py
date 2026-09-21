@@ -231,6 +231,8 @@ class InstallPlanner:
         user_candidates = Counter()
         for document in (reg1, reg2):
             for section in document.sections:
+                if section.deleted:
+                    continue
                 for value in section.values:
                     if value.kind not in {"sz", "expand_sz"}:
                         continue
@@ -259,6 +261,8 @@ class InstallPlanner:
         current_cf = str(self.layout.autocad_root).casefold().rstrip("\\/")
         for document in (reg1, reg2):
             for section in document.sections:
+                if section.deleted:
+                    continue
                 for value in section.values:
                     if value.kind not in {"sz", "expand_sz"}:
                         continue
