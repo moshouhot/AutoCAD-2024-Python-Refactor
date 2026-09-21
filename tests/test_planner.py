@@ -27,6 +27,11 @@ def make_package(root: Path) -> PackageLayout:
         REG_HEADER
         + r'''[HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\ACAD-7101:804]
 "UserPath"="C:\\Users\\Administrator\\AppData\\Roaming\\Autodesk"
+"LastRunTime"="legacy-runtime-value"
+
+[HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\ACAD-7101:804\MiniDump]
+"SessionStartCount"=dword:00000009
+"KeepMe"=dword:00000001
 
 [HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\ACAD-7101:804\Applications\CloudAccess]
 "LOADER"="%UserProfile%\\AppData\\Roaming\\Autodesk\\ApplicationPlugins\\Old.bundle\\Contents\\Cloud.dll"
@@ -81,6 +86,9 @@ def test_planner_rebases_paths_and_allowlists_registry(tmp_path: Path) -> None:
     assert all("CloudAccess" not in op.key for op in registry_values)
     assert all("AssemblyMap" not in op.key for op in registry_values)
     assert all("AcadVBA" not in op.key for op in registry_values)
+    assert all(op.name != "LastRunTime" for op in registry_values)
+    assert all(op.name != "SessionStartCount" for op in registry_values)
+    assert any(op.name == "KeepMe" for op in registry_values)
 
     loader = next(op for op in registry_values if op.name == "Loader")
     assert str(layout.autocad_root) in str(loader.data)

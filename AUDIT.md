@@ -116,3 +116,24 @@ python -m pytest -q
 - 公开 GitHub 仓库尚待创建并运行远端 CI / CodeQL。
 
 第三方审计应允许结论为 `BLOCKED` / `FAIL`，不得因为当前单元测试全绿而直接认定产品完成。
+
+## 6. 主审计补充：volatile registry state
+
+在真实 Core apply 后做只读 `diff --json` 时，发现旧 `reg1.dli` 快照中的两个运行时值会被 AutoCAD 自己改变：
+
+- `LastRunTime`
+- `MiniDump\SessionStartCount`
+
+它们属于“程序运行结果”，不是“安装契约”。如果继续由 installer 管理，重复安装会把 AutoCAD 自己的新状态写回旧快照值。
+
+因此 Core planner 已明确排除这两个值，并增加回归测试，确保不会因为整个 `MiniDump` section 被排除而顺带丢掉其他未知值。
+
+修复后真实只读 diff：
+
+- registry same = 8526
+- registry change = 0
+- registry create = 0
+- Junction same = 2
+- shortcut existing = 3
+
+这条经验应继续用于后续最小化：凡是从抓包模板进入 plan 的值，都要区分“安装状态”与“程序运行/用户活动产生的状态”。

@@ -141,6 +141,8 @@ class InstallPlanner:
             for value in section.values:
                 if value.kind == "delete":
                     continue
+                if self._excluded_core_registry_value(section.key, value.name, source):
+                    continue
                 data = value.data
                 if value.kind in {"sz", "expand_sz"}:
                     data = rebaser.apply(str(value.data))
@@ -244,6 +246,18 @@ class InstallPlanner:
             if "\\infocenter" in lowered:
                 return True
         if source == "reg2" and "\\applications\\acadvba" in lowered:
+            return True
+        return False
+
+    @staticmethod
+    def _excluded_core_registry_value(key: str, name: str, source: str) -> bool:
+        if source != "reg1":
+            return False
+        lowered_key = key.casefold()
+        lowered_name = name.casefold()
+        if lowered_name == "lastruntime":
+            return True
+        if "\\minidump" in lowered_key and lowered_name == "sessionstartcount":
             return True
         return False
 
