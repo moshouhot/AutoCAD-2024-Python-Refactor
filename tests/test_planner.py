@@ -213,6 +213,19 @@ def test_planner_refuses_version_from_unrelated_registry_root(tmp_path: Path) ->
         InstallPlanner(layout).build()
 
 
+def test_planner_refuses_nested_fake_version_under_autocad_root(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    text = layout.reg2.read_text(encoding="utf-16")
+    text = text.replace(
+        r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R24.3",
+        r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\SomeVendor\AutoCAD\R24.3",
+    )
+    layout.reg2.write_text(text, encoding="utf-16")
+
+    with pytest.raises(PackageError, match="Cannot parse AutoCAD registry version"):
+        InstallPlanner(layout).build()
+
+
 def test_planner_ignores_deleted_registry_version_sections(tmp_path: Path) -> None:
     layout = make_package(tmp_path)
     text = layout.reg2.read_text(encoding="utf-16")

@@ -42,7 +42,7 @@
 
 ## E. Non-live regression
 
-- [x] 当前全量 pytest PASS（38 passed）。
+- [x] 当前全量 pytest PASS（39 passed）。
 - [x] 所有 Phase 1 静态分析工具可重复运行。
 - [x] GitHub CI：`d74ce5e` 在 Windows 3.11 / 3.14、Ubuntu 3.11 / 3.14 四矩阵全部 PASS（run `35570091621`）。
 - [x] GitHub CodeQL：Python analysis PASS（run `35570091637`）。
