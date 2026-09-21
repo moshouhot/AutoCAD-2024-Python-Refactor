@@ -216,6 +216,30 @@ def _load_state(path: Path) -> dict[str, Any] | None:
     return data
 
 
+def inspect_install_state(path: Path) -> dict[str, Any]:
+    """Return a compact, read-only status view for CLI/reporting."""
+    if not path.is_file():
+        return {"exists": False, "status": None}
+    try:
+        state = _load_state(path)
+    except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+        return {
+            "exists": True,
+            "status": "invalid",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    assert state is not None
+    return {
+        "exists": True,
+        "status": state.get("status"),
+        "schema": state.get("schema"),
+        "registry_value_count": len(state.get("registry_values", {})),
+        "junction_count": len(state.get("created_junctions", {})),
+        "shortcut_count": len(state.get("shortcuts", {})),
+        "conflict_count": len(state.get("uninstall_conflicts", [])),
+    }
+
+
 def _write_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)

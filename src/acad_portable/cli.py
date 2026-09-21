@@ -10,7 +10,7 @@ from .model import PackageError, PackageLayout
 from .ops import operation_to_dict
 from .planner import InstallPlanner
 from .preflight import inspect_preflight
-from .real_windows import RealWindowsAdapter
+from .real_windows import RealWindowsAdapter, inspect_install_state
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
 def _status(layout: PackageLayout, as_json: bool) -> int:
     config = FeatureConfig.load(layout.config)
     preflight = inspect_preflight(layout)
+    installer_state = inspect_install_state(layout.acaoe / ".python-installer-state.json")
     payload = {
         "project_root": str(layout.project_root),
         "autocad_root": str(layout.autocad_root),
@@ -76,6 +77,7 @@ def _status(layout: PackageLayout, as_json: bool) -> int:
             "dotnet_release": preflight.dotnet_release,
             "dotnet_47_or_newer": preflight.dotnet_47_or_newer,
         },
+        "installer_state": installer_state,
     }
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -87,6 +89,7 @@ def _status(layout: PackageLayout, as_json: bool) -> int:
         print(f"Auto-load    : {'ready' if preflight.autoload_ready else 'incomplete'}")
         print(f"Admin        : {preflight.admin}")
         print(f".NET release : {preflight.dotnet_release}")
+        print(f"Installer    : {installer_state.get('status') or 'not-installed'}")
     return 0 if preflight.autoload_ready else 1
 
 

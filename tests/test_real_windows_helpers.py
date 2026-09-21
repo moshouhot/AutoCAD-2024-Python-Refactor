@@ -8,6 +8,7 @@ from acad_portable.real_windows import (
     _encode_json_value,
     _new_state,
     _ps_quote,
+    inspect_install_state,
 )
 
 
@@ -32,3 +33,13 @@ def test_new_state_has_ownership_sections() -> None:
 def test_shortcut_operation_is_plain_data() -> None:
     op = CreateShortcut(Path("a.lnk"), Path("acad.exe"), "/nologo", Path("."))
     assert op.arguments == "/nologo"
+
+
+def test_inspect_install_state_missing_and_invalid(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    assert inspect_install_state(path) == {"exists": False, "status": None}
+
+    path.write_text("not-json", encoding="utf-8")
+    status = inspect_install_state(path)
+    assert status["exists"] is True
+    assert status["status"] == "invalid"

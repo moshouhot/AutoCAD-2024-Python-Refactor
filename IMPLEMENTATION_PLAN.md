@@ -14,6 +14,8 @@
 
 ## P1 — CLI / Package Model
 
+状态：**non-live 完成**。
+
 实现：
 
 - Python package `acad_portable`；
@@ -25,6 +27,8 @@
 不做系统写入。
 
 ## P2 — Registry parser / rebasing
+
+状态：**non-live 完成**。
 
 实现：
 
@@ -39,6 +43,8 @@
 
 ## P3 — Core install plan
 
+状态：**non-live 完成**。
+
 生成：
 
 - AutoCAD HKLM/HKCU core registry operations；
@@ -51,6 +57,8 @@
 
 ## P4 — Real Windows adapter
 
+状态：**代码完成；真实 Core apply 尚未执行**。
+
 实现最小真实操作：
 
 - registry set/delete-owned；
@@ -62,6 +70,17 @@
 
 ## P5 — Local non-live acceptance
 
+状态：**完成**。
+
+当前证据：
+
+- 27 passed；
+- real package plan 11,305 operations；
+- warnings 0；
+- audit findings 0；
+- FakeWindows repeat apply 幂等；
+- Windows temp Junction / shortcut 实测通过。
+
 - 全量 pytest；
 - dry-run plan；
 - idempotency；
@@ -69,6 +88,8 @@
 - no-reg3/regedge/unreg gate。
 
 ## P6 — 真机 AutoCAD Core 验证
+
+状态：**待执行**。操作边界和证据要求见 `LIVE_ACCEPTANCE.md`。
 
 由本地 AI 只承担无法由当前工具可靠完成的真实 GUI/AutoCAD 操作：
 

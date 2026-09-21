@@ -107,3 +107,62 @@ def test_uninstall_preserves_external_registry_change(tmp_path: Path, monkeypatc
     assert len(report.conflicts) == 1
     assert memory.values[(key, "AcadLocation")]["data"] == r"G:\External"
     assert state_path.exists()
+
+
+def test_shortcut_journal_restores_preexisting_file(tmp_path: Path, monkeypatch) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    shortcut = tmp_path / "AutoCAD 2024.lnk"
+    shortcut.write_bytes(b"before-shortcut")
+    state_path = tmp_path / "state.json"
+
+    def fake_create_shortcut(operation) -> None:
+        operation.path.parent.mkdir(parents=True, exist_ok=True)
+        operation.path.write_bytes(b"installed-shortcut")
+
+    monkeypatch.setattr(rw, "_create_shortcut", fake_create_shortcut)
+    plan = InstallPlan(
+        operations=(
+            rw.CreateShortcut(shortcut, Path("acad.exe"), "/nologo", tmp_path),
+            WriteInstallState(state_path, {"test": True}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(plan)
+    assert shortcut.read_bytes() == b"installed-shortcut"
+
+    report = adapter.uninstall(state_path)
+    assert report.conflicts == ()
+    assert report.shortcuts_restored == 1
+    assert shortcut.read_bytes() == b"before-shortcut"
+
+
+def test_shortcut_journal_preserves_external_change(tmp_path: Path, monkeypatch) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    shortcut = tmp_path / "AutoCAD 2024.lnk"
+    state_path = tmp_path / "state.json"
+
+    def fake_create_shortcut(operation) -> None:
+        operation.path.parent.mkdir(parents=True, exist_ok=True)
+        operation.path.write_bytes(b"installed-shortcut")
+
+    monkeypatch.setattr(rw, "_create_shortcut", fake_create_shortcut)
+    plan = InstallPlan(
+        operations=(
+            rw.CreateShortcut(shortcut, Path("acad.exe"), "/nologo", tmp_path),
+            WriteInstallState(state_path, {"test": True}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(plan)
+    shortcut.write_bytes(b"external-change")
+
+    report = adapter.uninstall(state_path)
+    assert len(report.conflicts) == 1
+    assert shortcut.read_bytes() == b"external-change"
+    assert state_path.exists()
