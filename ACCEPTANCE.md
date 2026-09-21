@@ -12,37 +12,47 @@
 
 ## B. P1 Package Model
 
-- [ ] 能从项目根发现当前 AutoCAD 包。
-- [ ] `acad.exe` / ACAOE / CHS / legacy templates 缺失时给出明确错误。
-- [ ] 能正确读取 GB18030/UTF-16 legacy 输入。
-- [ ] `status` 不修改系统。
+- [x] 能从项目根发现当前 AutoCAD 包。
+- [x] `acad.exe` / ACAOE / CHS / legacy templates 缺失时给出明确错误。
+- [x] 能正确读取 GB18030/UTF-16 legacy 输入。
+- [x] `status` 不修改系统。
 
 ## C. P2 Registry plan
 
-- [ ] 正确解析 `reg1.dli` / `reg2.dli`。
-- [ ] 只允许预期 HKCU/HKLM AutoCAD roots。
-- [ ] 所有 legacy AcadLocation 路径都能转换为当前 root。
-- [ ] plan 中不存在旧 `D:\00\AutoCAD 2024\...` 残留。
-- [ ] Core plan 不包含 `reg3.dli` / `regedge.dli` / `vba.dli` / `unreg.dli` 全量导入。
-- [ ] Core plan 不包含 System32/SysWOW64 写入。
+- [x] 正确解析 `reg1.dli` / `reg2.dli`，包括 `REG_EXPAND_SZ`。
+- [x] 只允许预期 HKCU/HKLM AutoCAD roots。
+- [x] legacy AutoCAD package paths 能转换为当前 root。
+- [x] plan 中不存在旧 package root 残留（独立 plan audit = 0 findings）。
+- [x] Core plan 不包含 `reg3.dli` / `regedge.dli` / `vba.dli` / `unreg.dli` 全量导入。
+- [x] Core plan 不包含 System32/SysWOW64 写入。
+- [x] Core 排除了 HKCU 历史插件状态和 `AcadVBA`，避免尚未部署的 loader 悬空。
+- [x] Core 中计划写入的 AutoCAD Application loader 全部有实际目标或明确虚拟协议。
 
 ## D. P3 Fake install
 
-- [ ] 两个 CHS Junction 指向 `ACAOE/CHS`。
-- [ ] 普通安装不重置当前 CHS。
-- [ ] desktop shortcut 指向当前 `acad.exe /nologo`。
-- [ ] wizard shortcut 目标正确。
-- [ ] auto-load 链路存在且可被静态验证。
-- [ ] 第二次执行生成等价目标状态。
+- [x] 两个 CHS Junction 指向 `ACAOE/CHS`。
+- [x] 普通安装计划不重置当前 CHS。
+- [x] desktop shortcut 指向当前 `acad.exe /nologo`，并受配置开关控制。
+- [x] wizard shortcut 目标正确。
+- [x] auto-load 链路存在且可被静态验证。
+- [x] FakeWindows 第二次执行产生完全相同的目标状态。
 - [ ] uninstall 只删除本工具拥有的状态。
 
 ## E. Non-live regression
 
-- [ ] 全量 pytest PASS。
-- [ ] 所有静态分析工具可重复运行。
-- [ ] `git status` 只含预期源码/文档变化。
-- [ ] 未执行真实 CMD 安装器。
-- [ ] 未写 System32/SysWOW64。
+- [x] 当前全量 pytest PASS（14 passed）。
+- [x] 所有 Phase 1 静态分析工具可重复运行。
+- [ ] `git status` 只含预期源码/文档变化（提交后复核）。
+- [x] 本轮未执行真实 CMD 安装器。
+- [x] 本轮未写 System32/SysWOW64。
+
+### 当前真实包 non-live 证据
+
+- Core plan operations：11,305
+- plan warnings：0
+- independent audit findings：0
+- FakeWindows 两次 apply：幂等
+- Windows read-only preflight：管理员=True，.NET Release=533325，Auto-load=ready
 
 ## F. MVP-A 真机验收
 

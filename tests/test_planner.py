@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from acad_portable.model import PackageLayout
+from acad_portable.ops import CreateShortcut, EnsureJunction, SetRegistryValue
+from acad_portable.planner import InstallPlanner, KnownFolders
+
+
+REG_HEADER = "Windows Registry Editor Version 5.00\n\n"
+
+
+def make_package(root: Path) -> PackageLayout:
+    acad = root / "AutoCAD 2024"
+    acaoe = acad / "ACAOE"
+    (acaoe / "CHS" / "Plotters" / "Plot Styles").mkdir(parents=True)
+    (acad / "Support").mkdir(parents=True)
+    (acad / "0加载应用程序").mkdir(parents=True)
+    (acad / "acad.exe").write_bytes(b"exe")
+    (acad / "addplwiz.exe").write_bytes(b"exe")
+    (acad / "styshwiz.exe").write_bytes(b"exe")
+    (acad / "Support" / "acad2024.lsp").write_text('(load "appload.lsp")', encoding="utf-8")
+    (acad / "Support" / "appload.lsp").write_text("(princ)", encoding="utf-8")
+    (acaoe / "配置.txt").write_text("桌面快捷方式=1\n", encoding="utf-8")
+
+    (acaoe / "reg1.dli").write_text(
+        REG_HEADER
+        + r'''[HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\ACAD-7101:804]
+"UserPath"="C:\\Users\\Administrator\\AppData\\Roaming\\Autodesk"
+
+[HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\ACAD-7101:804\Applications\CloudAccess]
+"LOADER"="%UserProfile%\\AppData\\Roaming\\Autodesk\\ApplicationPlugins\\Old.bundle\\Contents\\Cloud.dll"
+
+[HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\ACAD-7101:804\AssemblyMap]
+"OldPlugin"="C:\\Users\\Administrator\\AppData\\Roaming\\Autodesk\\ApplicationPlugins\\Old.dll"
+
+[HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\ACAD-7101:804\Profiles\<<未命名配置>>\General]
+"ACAD"=hex(2):45,00,3a,00,5c,00,4f,00,6c,00,64,00,5c,00,41,00,75,00,74,00,6f,00,43,00,41,00,44,00,20,00,32,00,30,00,32,00,34,00,5c,00,53,00,75,00,70,00,70,00,6f,00,72,00,74,00,00,00
+
+[HKEY_CURRENT_USER\SOFTWARE\OtherVendor]
+"ShouldNotAppear"="x"
+''',
+        encoding="utf-16",
+    )
+    (acaoe / "reg2.dli").write_text(
+        REG_HEADER
+        + r'''[HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R24.3\ACAD-7101:804]
+"AcadLocation"="D:\\00\\AutoCAD 2024\\AutoCAD 2024\\"
+"ProductNameGlob"="AutoCAD 2024"
+"Loader"="D:\\00\\AutoCAD 2024\\AutoCAD 2024\\acad.exe"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R24.3\ACAD-7101:804\Applications\AcadVBA]
+"LOADER"="C:\\Program Files\\Autodesk\\ApplicationPlugins\\AcVBA2024.Bundle\\Contents\\AcVBA.arx"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\EdgeUpdate]
+"ShouldNotAppear"="x"
+''',
+        encoding="utf-16",
+    )
+    return PackageLayout.discover(root)
+
+
+def test_planner_rebases_paths_and_allowlists_registry(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    folders = KnownFolders(
+        user_profile=Path(r"C:\Users\Tester"),
+        appdata=Path(r"C:\Users\Tester\AppData\Roaming"),
+        local_appdata=Path(r"C:\Users\Tester\AppData\Local"),
+        desktop=Path(r"C:\Users\Tester\Desktop"),
+        windows=Path(r"C:\Windows"),
+        program_data=Path(r"C:\ProgramData"),
+        public=Path(r"C:\Users\Public"),
+    )
+
+    plan = InstallPlanner(layout, folders).build()
+
+    registry_values = [op for op in plan.operations if isinstance(op, SetRegistryValue)]
+    assert registry_values
+    assert all("OtherVendor" not in op.key for op in registry_values)
+    assert all("EdgeUpdate" not in op.key for op in registry_values)
+    assert all("CloudAccess" not in op.key for op in registry_values)
+    assert all("AssemblyMap" not in op.key for op in registry_values)
+    assert all("AcadVBA" not in op.key for op in registry_values)
+
+    loader = next(op for op in registry_values if op.name == "Loader")
+    assert str(layout.autocad_root) in str(loader.data)
+    assert r"D:\00\AutoCAD 2024" not in str(loader.data)
+
+    user_path = next(op for op in registry_values if op.name == "UserPath")
+    assert str(user_path.data).startswith(r"C:\Users\Tester")
+
+    acad_path = next(op for op in registry_values if op.name == "ACAD")
+    assert acad_path.kind == "expand_sz"
+    assert acad_path.data == str(layout.autocad_root / "Support")
+    assert not plan.warnings
+
+
+def test_planner_builds_chs_junctions_and_shortcuts(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    folders = KnownFolders(
+        user_profile=Path(r"C:\Users\Tester"),
+        appdata=Path(r"C:\Users\Tester\AppData\Roaming"),
+        local_appdata=Path(r"C:\Users\Tester\AppData\Local"),
+        desktop=Path(r"C:\Users\Tester\Desktop"),
+        windows=Path(r"C:\Windows"),
+        program_data=Path(r"C:\ProgramData"),
+        public=Path(r"C:\Users\Public"),
+    )
+
+    plan = InstallPlanner(layout, folders).build()
+    junctions = [op for op in plan.operations if isinstance(op, EnsureJunction)]
+    assert len(junctions) == 2
+    assert all(op.target == layout.chs for op in junctions)
+
+    shortcuts = [op for op in plan.operations if isinstance(op, CreateShortcut)]
+    assert len(shortcuts) == 3
+    desktop = next(op for op in shortcuts if op.path.parent == folders.desktop)
+    assert desktop.target == layout.acad_exe
+    assert desktop.arguments == "/nologo"
+
+
+def test_desktop_shortcut_respects_config(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    layout.config.write_text("桌面快捷方式=0\n", encoding="utf-8")
+    folders = KnownFolders(
+        user_profile=Path(r"C:\Users\Tester"),
+        appdata=Path(r"C:\Users\Tester\AppData\Roaming"),
+        local_appdata=Path(r"C:\Users\Tester\AppData\Local"),
+        desktop=Path(r"C:\Users\Tester\Desktop"),
+        windows=Path(r"C:\Windows"),
+        program_data=Path(r"C:\ProgramData"),
+        public=Path(r"C:\Users\Public"),
+    )
+    plan = InstallPlanner(layout, folders).build()
+    shortcuts = [op for op in plan.operations if isinstance(op, CreateShortcut)]
+    assert len(shortcuts) == 2
+    assert all(op.path.parent != folders.desktop for op in shortcuts)
+
