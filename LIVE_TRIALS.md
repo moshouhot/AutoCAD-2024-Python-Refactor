@@ -163,8 +163,8 @@ Trial 1 不计为产品 PASS，但它证明了：
 
 为避免只根据窗口标题推断，使用只读 Win32 窗口文本探针重新启动并读取错误对话框。错误正文为：
 
-> 安装出现问题，AutoCAD 无法继续。  
-> 如果注册表清理软件已删除或更改了运行 AutoCAD 所需的注册表项，会出现此错误。  
+> 安装出现问题，AutoCAD 无法继续。
+> 如果注册表清理软件已删除或更改了运行 AutoCAD 所需的注册表项，会出现此错误。
 > 要恢复所需的注册表项，您需要使用 Windows“控制面板”中的“添加/删除程序”功能重新安装 AutoCAD。
 
 第三次探测 PID 31336 也只关闭该次自己启动的进程，并正常退出。
@@ -181,4 +181,116 @@ Windows Application log 在对应时间段未发现标准 1000/1001 acad.exe cra
 而 reg3 明确把该 CLSID 的 `LocalServer32` 指向 AutoCAD `acad.exe /Automation`。
 
 结论：当前“只使用 reg1 + reg2”的 Core 注册范围不足。下一步不是整份导入 reg3，而是先补最小 `AutoCAD.Application` COM bootstrap，再重复同一启动验收。
+
+## Trial 4 — clean host reinstall / repeat install / Core launch still blocked
+
+前提：用户已先在本机卸载 AutoCAD 2024，本机被重新批准作为当前项目的专用 CAD 2024 测试环境。
+
+### Clean baseline
+
+基线 `main`：
+
+`7fad22451397c77ec0d1cc23d498f4bf0c27c3cd`
+
+只读检查确认：
+
+- `HKLM\SOFTWARE\Autodesk\AutoCAD\R24.3` 不存在；
+- `HKCU\SOFTWARE\Autodesk\AutoCAD\R24.3` 不存在；
+- `acad.exe` / `acLauncher.exe` 进程均不存在；
+- Windows/admin/.NET preflight PASS；
+- plan = 11,554 operations / 0 warnings / 0 audit findings；
+- live diff = 1 registry same / 0 change / 8,652 create / 2,891 keys create；
+- 2 Junction create / 0 conflict；
+- 2 个已存在 shortcut 是包内 CHS 的绘图仪/打印样式向导快捷方式；Desktop shortcut 尚未存在。
+
+旧 `.python-installer-state.json` 来自历史试验，虽然显示 `status=complete`，但当前 R24.3 根已经不存在，不能继续作为新 install 的 ownership baseline。
+
+因此先把旧 journal 复制到：
+
+`evidence-local/mvp-a-live-20260921T1642/stale-state-before-live.json`
+
+随后只删除工作位置中的旧 state 文件，使 fresh install 从 `installer_state.exists=false` 开始。
+
+### Fresh live install
+
+执行：
+
+`python -m acad_portable install --apply`
+
+结果：**PASS**。
+
+- applied operations = 11,553；
+- 新 state = `complete`；
+- registry journal = 8,653；
+- Junction journal = 2；
+- shortcuts journal = 3；
+- conflicts = 0。
+
+安装后只读 diff：
+
+- registry = **8,653 same / 0 change / 0 create**；
+- registry keys create = 0；
+- Junction = **2 same / 0 create / 0 conflict**；
+- shortcuts = **3 existing / 0 create**；
+- details = empty。
+
+直接查询还确认：
+
+- `AcadLocation` → 当前 F: 项目 `AutoCAD 2024`；
+- `AutodeskSharedFolder` → 当前 F: 项目 `Autodesk Shared`。
+
+### Repeat install
+
+第二次执行同一 `install --apply`：**PASS**。
+
+执行后：
+
+- registry 仍为 8,653 same / 0 change / 0 create；
+- 2 Junction same；
+- 3 shortcut existing；
+- journal 数量没有膨胀；
+- 未出现 ownership conflict。
+
+因此本轮已经真实证明：当前 Core install 路径在 clean host 上能够完成并保持幂等。
+
+### Real AutoCAD launch
+
+在 `0加载应用程序` 中放入一次性 probe LSP，并用 `/b` script 同时准备 startup marker；两者只用于本轮测试，不属于产品。
+
+真实启动：
+
+- `acad.exe` PID：`28940`；
+- ExecutablePath：当前 F: 项目 `AutoCAD 2024\acad.exe`；
+- CommandLine 包含 `/nologo /b ...live_probe.scr`；
+- AutoCAD 进程确实创建成功，但两个 marker 均未生成。
+
+Win32 只读窗口探针确认：
+
+- 窗口标题：`AutoCAD 错误中断`；
+- 错误正文：
+
+> 安装出现问题，AutoCAD 无法继续。  
+> 如果注册表清理软件已删除或更改了运行 AutoCAD 所需的注册表项，会出现此错误。  
+> 要恢复所需的注册表项，您需要使用 Windows“控制面板”中的“添加/删除程序”功能重新安装 AutoCAD。
+
+因此：
+
+- 不是旧 journal 污染导致；
+- 不是 D:/E:/F: 混合注册状态导致；
+- 不是 probe 脚本本身导致；
+- 当前 clean install 的文件路径/Junction/shortcut/已计划 registry 都正确落地；
+- **剩余 blocker 已进一步收窄为：MVP-A Core registry allowlist 仍缺 AutoCAD 启动必需注册。**
+
+本轮只关闭自己启动的 PID 28940；当前已应用状态保留，不执行 uninstall，便于继续做最小缺项诊断。
+
+### 调试分工
+
+从这一点开始，耗时的 Frida / registry trace / 窗口调试交给本地 AI；主 AI 只负责：
+
+1. 审核本地 AI 的 trace 是否为真实启动证据；
+2. 判断缺失项是否属于 Core 而不是 Installer/Edge/Forms/AcSign/Shell 噪音；
+3. 决定最小 allowlist 补集；
+4. 审核代码、测试和最终 live acceptance。
+
+本地 AI 任务规范见 `LOCAL_AI_LIVE_DEBUG_TASK.md`。
 
