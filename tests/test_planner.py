@@ -119,7 +119,9 @@ def test_planner_rebases_paths_and_allowlists_registry(tmp_path: Path) -> None:
         if "{8B4929F8-076F-4AEC-AFEE-8928747B7AE3}" in op.key
         and op.name == ""
     )
-    assert str(layout.acad_exe) in str(com_server.data)
+    expected_exe = str(layout.acad_exe).replace("/", "\\")
+    actual_server = str(com_server.data).replace("/", "\\")
+    assert expected_exe in actual_server
 
     loader = next(op for op in registry_values if op.name == "Loader")
     assert str(layout.autocad_root) in str(loader.data)

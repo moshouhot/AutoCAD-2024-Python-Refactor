@@ -188,7 +188,7 @@ def test_live_diff_classifies_registry_without_writing(tmp_path: Path, monkeypat
         metadata={},
     )
 
-    report = rw.inspect_live_diff(plan)
+    report = rw.inspect_live_diff(plan, allow_non_windows_for_tests=True)
     assert report.registry_same == 1
     assert report.registry_change == 1
     assert report.registry_create == 1

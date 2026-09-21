@@ -55,9 +55,13 @@ class LiveDiffReport:
     details: tuple[str, ...]
 
 
-def inspect_live_diff(plan: InstallPlan) -> LiveDiffReport:
+def inspect_live_diff(
+    plan: InstallPlan,
+    *,
+    allow_non_windows_for_tests: bool = False,
+) -> LiveDiffReport:
     """Compare a Core plan to the current Windows state without modifying it."""
-    if os.name != "nt":
+    if os.name != "nt" and not allow_non_windows_for_tests:
         raise RuntimeError("live diff requires Windows")
 
     registry_same = 0
