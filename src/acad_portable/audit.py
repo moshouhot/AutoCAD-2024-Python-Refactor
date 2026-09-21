@@ -15,6 +15,7 @@ from .ops import (
 )
 from .planner import (
     AUTOCAD_APPLICATION_COM_PREFIXES,
+    AUTOCAD_REG3_CORE_PREFIXES,
     HKCU_AUTOCAD,
     HKLM_AUTOCAD,
     InstallPlan,
@@ -32,7 +33,7 @@ def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFi
     allowed_roots = (
         HKCU_AUTOCAD.casefold(),
         HKLM_AUTOCAD.casefold(),
-        *(prefix.casefold() for prefix in AUTOCAD_APPLICATION_COM_PREFIXES),
+        *(prefix.casefold() for prefix in AUTOCAD_REG3_CORE_PREFIXES),
     )
     supported_registry_kinds = {"sz", "expand_sz", "dword"}
 

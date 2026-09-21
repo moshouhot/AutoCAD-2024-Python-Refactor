@@ -37,6 +37,16 @@ AUTOCAD_APPLICATION_COM_PREFIXES = (
     rf"{HKLM_CLASSES}\TypeLib\{{AA9A2205-75AA-43AD-9138-1767F1BB5E0C}}",
 )
 
+AUTOCAD_REG3_CORE_PREFIXES = AUTOCAD_APPLICATION_COM_PREFIXES + (
+    r"HKEY_CURRENT_USER\SOFTWARE\Autodesk\DwgCommon",
+    r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Drawing Check",
+    r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Hardcopy",
+    r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\ObjectDBX",
+    rf"{HKLM_CLASSES}\ObjectDBX.AxDbDocument.24",
+    rf"{HKLM_CLASSES}\CLSID\{{39C92898-2FBB-4629-8E1B-6968D3122EC4}}",
+    rf"{HKLM_CLASSES}\TypeLib\{{39FFAA00-8623-488F-8C53-DD3B0B7A464F}}",
+)
+
 
 @dataclass(frozen=True)
 class KnownFolders:
@@ -91,7 +101,7 @@ class InstallPlanner:
         warnings: list[str] = []
         operations.extend(self._registry_ops(reg1, HKCU_AUTOCAD, rebaser, warnings, source="reg1"))
         operations.extend(self._registry_ops(reg2, HKLM_AUTOCAD, rebaser, warnings, source="reg2"))
-        operations.extend(self._application_com_ops(reg3, rebaser, warnings))
+        operations.extend(self._reg3_core_ops(reg3, rebaser, warnings))
 
         local_product = self.folders.local_appdata / "Autodesk" / product_name / version
         roaming_product = self.folders.appdata / "Autodesk" / product_name / version
@@ -136,14 +146,14 @@ class InstallPlanner:
             },
         )
 
-    def _application_com_ops(
+    def _reg3_core_ops(
         self,
         document: RegistryDocument,
         rebaser: PathRebaser,
         warnings: list[str],
     ) -> list[Operation]:
         ops: list[Operation] = []
-        prefixes = tuple(prefix.casefold() for prefix in AUTOCAD_APPLICATION_COM_PREFIXES)
+        prefixes = tuple(prefix.casefold() for prefix in AUTOCAD_REG3_CORE_PREFIXES)
         for section in document.sections:
             if section.deleted or not section.key.casefold().startswith(prefixes):
                 continue
