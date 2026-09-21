@@ -57,7 +57,7 @@
 
 ## P4 — Real Windows adapter
 
-状态：**代码完成；真实 Core apply 尚未执行**。
+状态：**代码完成；历史上已执行过真实 Core apply，但最终 live 验收尚未完成**。
 
 实现最小真实操作：
 
@@ -68,20 +68,23 @@
 
 不得增加 System32 / WebView2 / AcSign 写入。
 
+历史 live apply 已产生 `.python-installer-state.json`，并验证过 journal/rollback 的部分真实行为；但当前主机随后发生大规模 registry 漂移，因此这些历史 apply 只作为实现证据，不能作为最终 MVP-A PASS。
+
 ## P5 — Local non-live acceptance
 
 状态：**完成**。
 
 当前证据：
 
-- 31 passed；
+- 33 passed；
 - real package plan **11,554 operations**；
 - warnings 0；
 - audit findings 0；
 - FakeWindows repeat apply 幂等；
 - Windows temp Junction / shortcut 实测通过。
-- read-only live diff：0 registry overwrite，8528 values / 2769 keys 待新建。
-- Trial 1 live apply：redirected Desktop 暴露路径解析缺陷；完整 journal rollback 已实测 0 conflict；修复后重新回到 clean pre-live state。
+- 历史 Trial 1 live apply：redirected Desktop 暴露路径解析缺陷；journal rollback 已实测 0 conflict；该缺陷已修复。
+- 后续历史 apply 曾形成 `status=complete`；但当前主机 journal vs live 已有 278 registry value 漂移，其中 267 为 F:→D:，因此“clean pre-live state”不再成立。
+- 当前只读状态见 `CURRENT_STATE_AUDIT.md`；不得用旧的 0-overwrite diff 作为现状证据。
 
 - 全量 pytest；
 - dry-run plan；
@@ -104,6 +107,8 @@
 本地 AI 只返回证据，不自行扩大范围。
 
 当前机器曾出现一次 `status=complete` 的真实 Core apply，但其后 registry 大量从 F: 漂移回 D:/E:：当前 journal 8656 values 中有 278 与 live 不同，其中 267 为明确 F:→D: 路径漂移。因此这台机器当前不能作为 F: Core 的单一来源验收基线，也不应直接再次 apply/uninstall 来“修平”差异。
+
+最终 live 验收改在**一个长期独立的 CAD 2024 测试 Windows 环境**完成。无需为每轮测试创建快照；要求只是这个环境不承载需要保留的其他 AutoCAD 2024 状态，并在每轮验收前做只读 baseline 核验。
 
 ## P7 — Core 审计收口
 

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from acad_portable.model import PackageLayout
+import pytest
+
+from acad_portable.model import PackageError, PackageLayout
 from acad_portable.ops import CreateShortcut, EnsureJunction, SetRegistryValue
 from acad_portable.planner import InstallPlanner, KnownFolders
 
@@ -178,4 +180,13 @@ def test_desktop_shortcut_respects_config(tmp_path: Path) -> None:
     shortcuts = [op for op in plan.operations if isinstance(op, CreateShortcut)]
     assert len(shortcuts) == 2
     assert all(op.path.parent != folders.desktop for op in shortcuts)
+
+
+def test_planner_refuses_unparseable_registry_version(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    text = layout.reg2.read_text(encoding="utf-16")
+    layout.reg2.write_text(text.replace(r"\AutoCAD\R24.3", r"\AutoCAD\UNKNOWN"), encoding="utf-16")
+
+    with pytest.raises(PackageError, match="registry version"):
+        InstallPlanner(layout).build()
 

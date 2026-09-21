@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import FeatureConfig
-from .model import PackageLayout
+from .model import PackageError, PackageLayout
 from .ops import (
     CreateShortcut,
     EnsureDirectory,
@@ -93,7 +93,9 @@ class InstallPlanner:
         acad_location = reg2.first_string("AcadLocation")
         product_name = reg2.first_string("ProductNameGlob") or "AutoCAD 2024"
 
-        version = self._version_from_keys(reg2) or "R24.3"
+        version = self._version_from_keys(reg2)
+        if version is None:
+            raise PackageError("Cannot parse AutoCAD registry version from reg2.dli")
         mappings = self._path_mappings(reg1, reg2, acad_location)
         rebaser = PathRebaser(mappings)
 
