@@ -13,10 +13,30 @@ from .ops import (
     EnsureDirectory,
     EnsureJunction,
     EnsureRegistryKey,
+    InstallArchiveFile,
     Operation,
     SetRegistryValue,
     WriteInstallState,
 )
+
+VBA_ARCHIVE_PASSWORD = "zzz"
+VBA_BASE_FILE_MEMBERS = (
+    "Program Files (x86)/Common Files/Microsoft Shared/VBA/VBA6/VBE6EXT.OLB",
+    "Program Files/Autodesk/ApplicationPlugins/AcVBA2024.Bundle/Contents/AcVba.arx",
+    "Program Files/Autodesk/ApplicationPlugins/AcVBA2024.Bundle/PackageContents.xml",
+    "Program Files/Autodesk/ApplicationPlugins/AcVBA2024.Bundle/vbaext.ico",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/1033/APC71ITL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/1033/VBE7INTL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/1033/VBEUIINTL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/2052/APC71ITL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/2052/VBE7INTL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/2052/VBEUIINTL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/apc71.dll",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/VBE7.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/VBEUI.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/VBEUIRES.DLL",
+)
+
 from .registry import PathRebaser, RegistryDocument
 
 
@@ -33,6 +53,27 @@ HKLM_CLASSES = r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes"
 HISTORICAL_USER_RE = re.compile(r"(?i)[A-Z]:\\Users\\[^\\\";]+")
 AUTOCAD_MARKER = "\\autocad 2024"
 SUPPORTED_AUTOCAD_REGISTRY_VERSION = "R24.3"
+
+VBA_RUNTIME_REGISTRY_PREFIXES = (
+    r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R24.3\AutoCAD 2024 VBA Enabler",
+    rf"{HKLM_CLASSES}\CLSID\{{2F967C44-B1F0-485E-957C-97538BCAD2DE}}",
+    rf"{HKLM_CLASSES}\CLSID\{{943FA227-E90C-47DA-987B-C4DD13E48CB4}}",
+    rf"{HKLM_CLASSES}\CLSID\{{95C9DCCD-A44A-4034-84BB-D7912DF5711F}}",
+    rf"{HKLM_CLASSES}\CLSID\{{CFE9F29B-E1B6-4240-AED7-360846769314}}",
+    rf"{HKLM_CLASSES}\TypeLib\{{000204EF-0000-0000-C000-000000000046}}",
+    rf"{HKLM_CLASSES}\TypeLib\{{0002E157-0000-0000-C000-000000000046}}",
+    rf"{HKLM_CLASSES}\TypeLib\{{2DF8D04C-5BFA-101B-BDE5-00AA0044DE52}}",
+    rf"{HKLM_CLASSES}\TypeLib\{{A6128B1F-4A3A-40B6-B5CE-5FE8DE3D88E9}}",
+    rf"{HKLM_CLASSES}\MSAPC.Apc",
+    rf"{HKLM_CLASSES}\MSAPC.Apc.7.1",
+    rf"{HKLM_CLASSES}\MSAPC.ApcCollection",
+    rf"{HKLM_CLASSES}\MSAPC.ApcCollection.7.1",
+    rf"{HKLM_CLASSES}\MSAPC.ApcGlobal",
+    rf"{HKLM_CLASSES}\MSAPC.ApcGlobal.7.1",
+    rf"{HKLM_CLASSES}\MSAPC.ApcHostAddIns",
+    rf"{HKLM_CLASSES}\MSAPC.ApcHostAddIns.7.1",
+    r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\VBA",
+)
 
 AUTOCAD_APPLICATION_COM_PREFIXES = (
     rf"{HKCU_CLASSES}\AutoCAD.Application",
@@ -73,6 +114,8 @@ class KnownFolders:
     windows: Path
     program_data: Path
     public: Path
+    program_files: Path = Path(r"C:\Program Files")
+    program_files_x86: Path = Path(r"C:\Program Files (x86)")
 
     @classmethod
     def current(cls) -> "KnownFolders":
@@ -82,8 +125,10 @@ class KnownFolders:
         windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
         program_data = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
         public = Path(os.environ.get("PUBLIC", str(user.parent / "Public")))
+        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
         desktop = _desktop_folder(user)
-        return cls(user, appdata, local, desktop, windows, program_data, public)
+        return cls(user, appdata, local, desktop, windows, program_data, public, program_files, program_files_x86)
 
 
 @dataclass(frozen=True)
@@ -128,6 +173,17 @@ class InstallPlanner:
         operations.extend(self._registry_ops(reg2, HKLM_AUTOCAD, rebaser, warnings, source="reg2"))
         operations.extend(self._reg3_core_ops(reg3, rebaser, warnings))
 
+        vba_enabled = config.enabled("安装 VBA编程", default=False)
+        if vba_enabled:
+            if not self.layout.vba_archive.is_file():
+                raise PackageError(f"VBA archive not found: {self.layout.vba_archive}")
+            if not self.layout.vba_registry.is_file():
+                raise PackageError(f"VBA registry template not found: {self.layout.vba_registry}")
+            vba_registry = RegistryDocument.load(self.layout.vba_registry)
+            operations.extend(self._vba_file_ops())
+            operations.extend(self._vba_acad_registry_ops(reg2, rebaser, warnings))
+            operations.extend(self._vba_runtime_registry_ops(vba_registry, warnings))
+
         local_product = self.folders.local_appdata / "Autodesk" / product_name / version
         roaming_product = self.folders.appdata / "Autodesk" / product_name / version
         for parent in (local_product, roaming_product):
@@ -168,8 +224,103 @@ class InstallPlanner:
                 "autocad_root": str(self.layout.autocad_root),
                 "desktop_shortcut": config.enabled("桌面快捷方式", default=True),
                 "desktop": str(self.folders.desktop),
+                "vba_enabled": vba_enabled,
             },
         )
+
+    def _vba_file_ops(self) -> list[Operation]:
+        ops: list[Operation] = []
+        for member in VBA_BASE_FILE_MEMBERS:
+            if member.startswith("Program Files (x86)/"):
+                relative = member.removeprefix("Program Files (x86)/")
+                destination = self.folders.program_files_x86 / Path(relative)
+            elif member.startswith("Program Files/"):
+                relative = member.removeprefix("Program Files/")
+                destination = self.folders.program_files / Path(relative)
+            else:
+                raise PackageError(f"unsupported VBA payload destination: {member}")
+            ops.append(
+                InstallArchiveFile(
+                    archive=self.layout.vba_archive,
+                    member=member,
+                    destination=destination,
+                    password=VBA_ARCHIVE_PASSWORD,
+                )
+            )
+        return ops
+
+    def _vba_runtime_registry_ops(
+        self,
+        document: RegistryDocument,
+        warnings: list[str],
+    ) -> list[Operation]:
+        ops: list[Operation] = []
+        for section in document.sections:
+            if section.deleted or not any(
+                registry_key_is_same_or_descendant(section.key, prefix)
+                for prefix in VBA_RUNTIME_REGISTRY_PREFIXES
+            ):
+                continue
+            ops.append(EnsureRegistryKey(section.key))
+            for value in section.values:
+                if value.kind == "delete":
+                    continue
+                if value.kind not in {"sz", "dword"}:
+                    warnings.append(
+                        f"Unsupported VBA registry value: {section.key} [{value.name}] type={value.kind}"
+                    )
+                    continue
+                data = value.data
+                if value.kind == "sz":
+                    data = self._rebase_vba_path(str(value.data))
+                ops.append(SetRegistryValue(section.key, value.name, value.kind, data))
+        return ops
+
+    def _rebase_vba_path(self, value: str) -> str:
+        mappings = (
+            (
+                r"C:\PROGRA~1\COMMON~1\MICROS~1\VBA",
+                str(self.folders.program_files / "Common Files" / "Microsoft Shared" / "VBA"),
+            ),
+            (
+                r"C:\Program Files\Common Files\Microsoft Shared\VBA",
+                str(self.folders.program_files / "Common Files" / "Microsoft Shared" / "VBA"),
+            ),
+            (
+                r"C:\Program Files (x86)\Common Files\Microsoft Shared\VBA",
+                str(self.folders.program_files_x86 / "Common Files" / "Microsoft Shared" / "VBA"),
+            ),
+        )
+        return PathRebaser(list(mappings)).apply(value)
+
+    def _vba_acad_registry_ops(
+        self,
+        document: RegistryDocument,
+        rebaser: PathRebaser,
+        warnings: list[str],
+    ) -> list[Operation]:
+        ops: list[Operation] = []
+        for section in document.sections:
+            if section.deleted:
+                continue
+            key_cf = section.key.casefold()
+            if not registry_key_is_same_or_descendant(section.key, HKLM_AUTOCAD):
+                continue
+            if "\\applications\\acadvba" not in key_cf:
+                continue
+            ops.append(EnsureRegistryKey(section.key))
+            for value in section.values:
+                if value.kind == "delete":
+                    continue
+                data = value.data
+                if value.kind in {"sz", "expand_sz"}:
+                    data = rebaser.apply(str(value.data))
+                    if self._contains_historical_package_path(str(data), rebaser):
+                        warnings.append(
+                            f"Unresolved legacy VBA path: {section.key} [{value.name}] -> {data}"
+                        )
+                ops.append(SetRegistryValue(section.key, value.name, value.kind, data))
+        return ops
 
     def _reg3_core_ops(
         self,

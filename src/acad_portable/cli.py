@@ -165,7 +165,8 @@ def _uninstall(layout: PackageLayout, apply: bool) -> int:
         "UNINSTALL: "
         f"registry restored={report.registry_restored}, removed={report.registry_removed}, "
         f"shortcuts restored={report.shortcuts_restored}, removed={report.shortcuts_removed}, "
-        f"junctions removed={report.junctions_removed}, conflicts={len(report.conflicts)}"
+        f"files removed={report.files_removed}, junctions removed={report.junctions_removed}, "
+        f"conflicts={len(report.conflicts)}"
     )
     for conflict in report.conflicts:
         print(f"  CONFLICT: {conflict}")
@@ -195,6 +196,11 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
             "existing": report.shortcut_existing,
             "create": report.shortcut_create,
         },
+        "files": {
+            "same": report.file_same,
+            "create": report.file_create,
+            "conflict": report.file_conflict,
+        },
         "details": list(report.details),
     }
     if as_json:
@@ -210,7 +216,11 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
             f"same={report.junction_same} create={report.junction_create} conflict={report.junction_conflict}"
         )
         print(f"Shortcuts    : existing={report.shortcut_existing} create={report.shortcut_create}")
+        print(
+            "Files        : "
+            f"same={report.file_same} create={report.file_create} conflict={report.file_conflict}"
+        )
         for detail in report.details[:20]:
             print(f"  - {detail}")
-    return 0 if report.junction_conflict == 0 else 1
+    return 0 if report.junction_conflict == 0 and report.file_conflict == 0 else 1
 

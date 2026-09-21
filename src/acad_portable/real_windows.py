@@ -15,6 +15,7 @@ from .ops import (
     EnsureDirectory,
     EnsureJunction,
     EnsureRegistryKey,
+    InstallArchiveFile,
     Operation,
     SetRegistryValue,
     WriteInstallState,
@@ -38,6 +39,7 @@ class UninstallReport:
     shortcuts_restored: int
     shortcuts_removed: int
     junctions_removed: int
+    files_removed: int
     conflicts: tuple[str, ...]
 
 
@@ -52,6 +54,9 @@ class LiveDiffReport:
     junction_conflict: int
     shortcut_existing: int
     shortcut_create: int
+    file_same: int
+    file_create: int
+    file_conflict: int
     details: tuple[str, ...]
 
 
@@ -73,6 +78,9 @@ def inspect_live_diff(
     junction_conflict = 0
     shortcut_existing = 0
     shortcut_create = 0
+    file_same = 0
+    file_create = 0
+    file_conflict = 0
     details: list[str] = []
 
     for operation in plan.operations:
@@ -89,7 +97,7 @@ def inspect_live_diff(
             }
             if current is None:
                 registry_create += 1
-            elif current == wanted:
+            elif _registry_operation_matches_snapshot(operation, current):
                 registry_same += 1
             else:
                 registry_change += 1
@@ -113,6 +121,19 @@ def inspect_live_diff(
                 shortcut_existing += 1
             else:
                 shortcut_create += 1
+            continue
+
+        if isinstance(operation, InstallArchiveFile):
+            payload = _read_archive_member(operation)
+            wanted_sha = hashlib.sha256(payload).hexdigest()
+            if not operation.destination.exists():
+                file_create += 1
+            elif operation.destination.is_file() and _file_sha256(operation.destination) == wanted_sha:
+                file_same += 1
+            else:
+                file_conflict += 1
+                if len(details) < 100:
+                    details.append(f"FILE_CONFLICT {operation.destination}")
 
     return LiveDiffReport(
         registry_same=registry_same,
@@ -124,6 +145,9 @@ def inspect_live_diff(
         junction_conflict=junction_conflict,
         shortcut_existing=shortcut_existing,
         shortcut_create=shortcut_create,
+        file_same=file_same,
+        file_create=file_create,
+        file_conflict=file_conflict,
         details=tuple(details),
     )
 
@@ -171,6 +195,19 @@ class RealWindowsAdapter:
         shortcut_restored = 0
         shortcut_removed = 0
         junction_removed = 0
+        files_removed = 0
+
+        for path_text, entry in reversed(list(state.get("created_files", {}).items())):
+            path = Path(path_text)
+            installed_sha = entry.get("installed_sha256")
+            current_sha = _file_sha256(path) if path.is_file() else None
+            if current_sha is None:
+                continue
+            if current_sha != installed_sha:
+                conflicts.append(f"file changed externally: {path}")
+                continue
+            path.unlink()
+            files_removed += 1
 
         for identity, entry in reversed(list(state.get("registry_values", {}).items())):
             key, name = identity.split("\u0000", 1)
@@ -229,6 +266,7 @@ class RealWindowsAdapter:
             shortcuts_restored=shortcut_restored,
             shortcuts_removed=shortcut_removed,
             junctions_removed=junction_removed,
+            files_removed=files_removed,
             conflicts=tuple(conflicts),
         )
         if conflicts:
@@ -251,8 +289,11 @@ class RealWindowsAdapter:
         if isinstance(operation, SetRegistryValue):
             identity = f"{operation.key}\u0000{operation.name}"
             values = state.setdefault("registry_values", {})
+            current = _query_registry_value(operation.key, operation.name)
+            if current is not None and _registry_operation_matches_snapshot(operation, current):
+                return
             if identity not in values:
-                values[identity] = {"before": _query_registry_value(operation.key, operation.name)}
+                values[identity] = {"before": current}
             _set_registry_value(operation)
             values[identity]["installed"] = _query_registry_value(operation.key, operation.name)
             return
@@ -286,6 +327,28 @@ class RealWindowsAdapter:
             shortcuts[identity]["installed_sha256"] = _file_sha256(operation.path)
             return
 
+        if isinstance(operation, InstallArchiveFile):
+            payload = _read_archive_member(operation)
+            wanted_sha = hashlib.sha256(payload).hexdigest()
+            if operation.destination.is_file():
+                current_sha = _file_sha256(operation.destination)
+                if current_sha == wanted_sha:
+                    return
+                raise RuntimeError(
+                    "refusing to overwrite existing shared file with different content: "
+                    f"{operation.destination}"
+                )
+            if operation.destination.exists():
+                raise RuntimeError(f"file destination exists but is not a file: {operation.destination}")
+            operation.destination.parent.mkdir(parents=True, exist_ok=True)
+            operation.destination.write_bytes(payload)
+            state.setdefault("created_files", {})[str(operation.destination)] = {
+                "installed_sha256": wanted_sha,
+                "archive": str(operation.archive),
+                "member": operation.member,
+            }
+            return
+
         raise TypeError(f"unsupported operation: {type(operation).__name__}")
 
 
@@ -296,6 +359,7 @@ def _new_state() -> dict[str, Any]:
         "created_registry_keys": [],
         "registry_values": {},
         "created_junctions": {},
+        "created_files": {},
         "shortcuts": {},
     }
 
@@ -328,6 +392,7 @@ def inspect_install_state(path: Path) -> dict[str, Any]:
         "schema": state.get("schema"),
         "registry_value_count": len(state.get("registry_values", {})),
         "junction_count": len(state.get("created_junctions", {})),
+        "file_count": len(state.get("created_files", {})),
         "shortcut_count": len(state.get("shortcuts", {})),
         "conflict_count": len(state.get("uninstall_conflicts", [])),
     }
@@ -490,6 +555,27 @@ def _registry_snapshot_equal(left: dict[str, Any] | None, right: dict[str, Any] 
     return left == right
 
 
+def _registry_operation_matches_snapshot(
+    operation: SetRegistryValue,
+    snapshot: dict[str, Any],
+) -> bool:
+    wanted = {
+        "type": _registry_kind(operation.kind),
+        "data": _encode_json_value(operation.data),
+    }
+    if snapshot == wanted:
+        return True
+    if (
+        operation.kind == "sz"
+        and operation.name.casefold() == "vbe71dllpath"
+        and snapshot.get("type") == _registry_kind("sz")
+        and isinstance(snapshot.get("data"), str)
+        and isinstance(operation.data, str)
+    ):
+        return _same_path(Path(snapshot["data"]), Path(operation.data))
+    return False
+
+
 def _encode_json_value(value: Any) -> Any:
     if isinstance(value, bytes):
         return {"__bytes__": base64.b64encode(value).decode("ascii")}
@@ -569,3 +655,60 @@ def _file_sha256(path: Path) -> str | None:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _read_archive_member(operation: InstallArchiveFile) -> bytes:
+    member = operation.member.replace("\\", "/").lstrip("/")
+    parts = Path(member).parts
+    if not member or any(part in {"", ".", ".."} for part in parts):
+        raise RuntimeError(f"unsafe archive member path: {operation.member}")
+
+    with tempfile.TemporaryDirectory(prefix="acad-portable-archive-") as temp_dir:
+        temp_root = Path(temp_dir)
+        bundled_helper = operation.archive.parent.parent / "hui7za.dll"
+        if bundled_helper.is_file():
+            command = [
+                str(bundled_helper),
+                "x",
+                str(operation.archive),
+                member,
+                f"-o{temp_root}",
+                "-y",
+            ]
+            if operation.password is not None:
+                command.append(f"-p{operation.password}")
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="mbcs",
+                errors="replace",
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"bundled 7-Zip extraction failed ({result.returncode}): "
+                    f"{result.stdout} {result.stderr}".strip()
+                )
+        else:
+            try:
+                import py7zr
+            except ImportError as exc:
+                raise RuntimeError(
+                    "no bundled 7-Zip helper found and py7zr is unavailable"
+                ) from exc
+            try:
+                with py7zr.SevenZipFile(
+                    operation.archive, mode="r", password=operation.password
+                ) as archive:
+                    archive.extract(path=temp_root, targets=[member])
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Python archive extraction failed for {operation.archive}: {exc}"
+                ) from exc
+        extracted = temp_root / Path(member)
+        if not extracted.is_file():
+            raise RuntimeError(
+                f"archive member was not extracted: {operation.archive} :: {operation.member}"
+            )
+        return extracted.read_bytes()

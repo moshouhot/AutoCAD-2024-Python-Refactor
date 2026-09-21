@@ -37,12 +37,28 @@ class CreateShortcut:
 
 
 @dataclass(frozen=True)
+class InstallArchiveFile:
+    archive: Path
+    member: str
+    destination: Path
+    password: str | None = None
+
+
+@dataclass(frozen=True)
 class WriteInstallState:
     path: Path
     payload: dict[str, object]
 
 
-Operation = EnsureRegistryKey | SetRegistryValue | EnsureDirectory | EnsureJunction | CreateShortcut | WriteInstallState
+Operation = (
+    EnsureRegistryKey
+    | SetRegistryValue
+    | EnsureDirectory
+    | EnsureJunction
+    | CreateShortcut
+    | InstallArchiveFile
+    | WriteInstallState
+)
 
 
 def operation_to_dict(operation: Operation) -> dict[str, object]:

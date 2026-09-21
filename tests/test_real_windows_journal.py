@@ -212,3 +212,125 @@ def test_uninstall_skips_shortcut_that_never_finished_creation(tmp_path: Path, m
     assert report.shortcuts_removed == 0
     assert report.shortcuts_restored == 0
     assert not state_path.exists()
+
+
+def test_archive_file_install_creates_and_owned_uninstall_removes(tmp_path: Path, monkeypatch) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive-placeholder")
+    destination = tmp_path / "Program Files" / "Shared" / "runtime.dll"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda operation: b"runtime-v1")
+    plan = InstallPlan(
+        operations=(
+            rw.InstallArchiveFile(archive, "Program Files/Shared/runtime.dll", destination, "zzz"),
+            WriteInstallState(state_path, {"test": True}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+
+    adapter.apply_plan(plan)
+    assert destination.read_bytes() == b"runtime-v1"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert str(destination) in state["created_files"]
+
+    report = adapter.uninstall(state_path)
+    assert report.conflicts == ()
+    assert report.files_removed == 1
+    assert not destination.exists()
+
+
+def test_archive_file_install_reuses_identical_preexisting_file_without_ownership(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive-placeholder")
+    destination = tmp_path / "runtime.dll"
+    destination.write_bytes(b"runtime-v1")
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda operation: b"runtime-v1")
+    plan = InstallPlan(
+        operations=(
+            rw.InstallArchiveFile(archive, "runtime.dll", destination, "zzz"),
+            WriteInstallState(state_path, {"test": True}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+
+    adapter.apply_plan(plan)
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["created_files"] == {}
+
+    report = adapter.uninstall(state_path)
+    assert report.conflicts == ()
+    assert report.files_removed == 0
+    assert destination.read_bytes() == b"runtime-v1"
+
+
+def test_archive_file_install_refuses_different_preexisting_shared_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive-placeholder")
+    destination = tmp_path / "runtime.dll"
+    destination.write_bytes(b"external-version")
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda operation: b"runtime-v1")
+    plan = InstallPlan(
+        operations=(
+            rw.InstallArchiveFile(archive, "runtime.dll", destination, "zzz"),
+            WriteInstallState(state_path, {"test": True}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    try:
+        rw.RealWindowsAdapter(allow_non_windows_for_tests=True).apply_plan(plan)
+    except RuntimeError as exc:
+        assert "refusing to overwrite existing shared file" in str(exc)
+    else:
+        raise AssertionError("expected conflicting shared file to be refused")
+    assert destination.read_bytes() == b"external-version"
+
+
+def test_live_diff_classifies_archive_files_without_writing(tmp_path: Path, monkeypatch) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive-placeholder")
+    same = tmp_path / "same.dll"
+    same.write_bytes(b"runtime-v1")
+    create = tmp_path / "create.dll"
+    conflict = tmp_path / "conflict.dll"
+    conflict.write_bytes(b"external-version")
+    monkeypatch.setattr(rw, "_read_archive_member", lambda operation: b"runtime-v1")
+    plan = InstallPlan(
+        operations=(
+            rw.InstallArchiveFile(archive, "same.dll", same, "zzz"),
+            rw.InstallArchiveFile(archive, "create.dll", create, "zzz"),
+            rw.InstallArchiveFile(archive, "conflict.dll", conflict, "zzz"),
+            WriteInstallState(tmp_path / "state.json", {"test": True}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    report = rw.inspect_live_diff(plan, allow_non_windows_for_tests=True)
+
+    assert report.file_same == 1
+    assert report.file_create == 1
+    assert report.file_conflict == 1
+    assert any(str(conflict) in detail for detail in report.details)
+    assert not create.exists()

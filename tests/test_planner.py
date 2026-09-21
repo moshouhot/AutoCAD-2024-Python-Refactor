@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from acad_portable.audit import validate_core_plan
 from acad_portable.model import PackageError, PackageLayout
-from acad_portable.ops import CreateShortcut, EnsureJunction, SetRegistryValue
+from acad_portable.ops import CreateShortcut, EnsureJunction, InstallArchiveFile, SetRegistryValue
 from acad_portable.planner import InstallPlanner, KnownFolders
 
 
@@ -307,4 +308,80 @@ def test_planner_deleted_sections_do_not_influence_path_rebasing(tmp_path: Path)
         and not old.startswith(r"Z:\Deleted\AutoCAD 2024")
         for old in plan.metadata["legacy_path_prefixes"]
     )
+
+
+def test_vba_base_plan_includes_runtime_and_excludes_forms_and_installer(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    layout.config.write_text("桌面快捷方式=1\n安装 VBA编程=1\n", encoding="utf-8")
+    layout.vba_archive.parent.mkdir(parents=True, exist_ok=True)
+    layout.vba_archive.write_bytes(b"7z-placeholder")
+    layout.vba_registry.write_text(
+        REG_HEADER
+        + r'''[HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R24.3\AutoCAD 2024 VBA Enabler]
+"LangAbbrev"=""
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{2F967C44-B1F0-485E-957C-97538BCAD2DE}]
+@="Microsoft APC 7.1 Object Library"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{2F967C44-B1F0-485E-957C-97538BCAD2DE}\InprocServer32]
+@="C:\\Program Files\\Common Files\\Microsoft Shared\\VBA\\VBA7.1\\apc71.dll"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\MSAPC.ApcGlobal]
+@="Microsoft APC 7.1 Object Library"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\MSAPC.ApcGlobal\CurVer]
+@="MSAPC.ApcGlobal.7.1"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\TypeLib\{000204EF-0000-0000-C000-000000000046}\4.2\9\win64]
+@="C:\\PROGRA~1\\COMMON~1\\MICROS~1\\VBA\\VBA7.1\\VBE7.DLL"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\VBA]
+"Vbe71DllPath"="C:\\PROGRA~1\\COMMON~1\\MICROS~1\\VBA\\VBA7.1\\VBE7.DLL"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\VBA\VBA7.1\Install]
+@=dword:00000001
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\TypeLib\{0D452EE1-E08F-101A-852E-02608C4D0BB4}\2.0\0\win64]
+@="C:\\Windows\\system32\\FM20.DLL"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Installer\Products\FAKE]
+"ProductName"="Microsoft VBA 7.1"
+''',
+        encoding="utf-16",
+    )
+    folders = KnownFolders(
+        user_profile=Path(r"C:\Users\Tester"),
+        appdata=Path(r"C:\Users\Tester\AppData\Roaming"),
+        local_appdata=Path(r"C:\Users\Tester\AppData\Local"),
+        desktop=Path(r"C:\Users\Tester\Desktop"),
+        windows=Path(r"C:\Windows"),
+        program_data=Path(r"C:\ProgramData"),
+        public=Path(r"C:\Users\Public"),
+        program_files=Path(r"C:\Program Files"),
+        program_files_x86=Path(r"C:\Program Files (x86)"),
+    )
+
+    plan = InstallPlanner(layout, folders).build()
+    files = [op for op in plan.operations if isinstance(op, InstallArchiveFile)]
+    values = [op for op in plan.operations if isinstance(op, SetRegistryValue)]
+
+    assert plan.metadata["vba_enabled"] is True
+    assert len(files) == 14
+    assert all("FM20" not in op.member.upper() for op in files)
+    assert all("\\Windows\\System32" not in str(op.destination) for op in files)
+    assert any("AcVBA2024.Bundle" in str(op.destination) for op in files)
+    assert any("VBA7.1" in str(op.destination) for op in files)
+    assert any("\\Applications\\AcadVBA" in op.key for op in values)
+    assert any("MSAPC.ApcGlobal" in op.key for op in values)
+    assert any("SOFTWARE\\Microsoft\\VBA" in op.key for op in values)
+    assert all("\\Installer\\" not in op.key for op in values)
+    assert all("0D452EE1-E08F-101A-852E-02608C4D0BB4" not in op.key for op in values)
+    vbe_path = next(
+        str(op.data)
+        for op in values
+        if op.key.endswith(r"SOFTWARE\Microsoft\VBA") and op.name == "Vbe71DllPath"
+    )
+    assert vbe_path.startswith(r"C:\Program Files\Common Files\Microsoft Shared\VBA")
+    assert "PROGRA~1" not in vbe_path.upper()
+    assert validate_core_plan(plan, layout) == ()
 
