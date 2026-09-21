@@ -393,12 +393,12 @@ def _ensure_registry_key(key: str) -> None:
 
 
 def _registry_kind(kind: str) -> int:
-    import winreg
-
     mapping = {
-        "sz": winreg.REG_SZ,
-        "expand_sz": winreg.REG_EXPAND_SZ,
-        "dword": winreg.REG_DWORD,
+        # Stable Win32 registry type IDs. Keeping these local avoids importing
+        # winreg in pure classification tests that run on non-Windows CI.
+        "sz": 1,  # REG_SZ
+        "expand_sz": 2,  # REG_EXPAND_SZ
+        "dword": 4,  # REG_DWORD
     }
     try:
         return mapping[kind]

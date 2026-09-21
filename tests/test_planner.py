@@ -132,7 +132,9 @@ def test_planner_rebases_paths_and_allowlists_registry(tmp_path: Path) -> None:
 
     acad_path = next(op for op in registry_values if op.name == "ACAD")
     assert acad_path.kind == "expand_sz"
-    assert acad_path.data == str(layout.autocad_root / "Support")
+    expected_support = str(layout.autocad_root / "Support").replace("/", "\\")
+    actual_support = str(acad_path.data).replace("/", "\\")
+    assert actual_support == expected_support
     assert not plan.warnings
 
 
