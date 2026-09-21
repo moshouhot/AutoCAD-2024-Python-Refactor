@@ -66,6 +66,8 @@ python -m pytest -q
 - Windows preflight：`.NET 4.7+` 满足
 - Auto-load 静态链路：PASS
 - Windows 临时目录 Junction / Shortcut：PASS
+- GitHub CI：`d74ce5e` 四矩阵 PASS（Windows 3.11/3.14 + Ubuntu 3.11/3.14，run `35570091621`）
+- GitHub CodeQL：PASS（run `35570091637`）
 
 ## 4. 重点审计问题
 
@@ -114,7 +116,8 @@ python -m pytest -q
 - 真实 AutoCAD 启动曾进入“AutoCAD 错误中断”，后续补了 COM/core registration 候选层，但尚未在干净基线上完成重新验收；
 - 尚未验证 `0加载应用程序` 的真实启动时加载；
 - VBA 属于后续 MVP-B；
-- 公开 GitHub 仓库已经创建；远端 CI / CodeQL 结果仍需作为独立证据检查。
+- 公开 GitHub 仓库、CI、CodeQL 已建立并通过；但这只证明当前源码/测试和静态分析通过，不等价于真机产品验收。
+- 本地 Codex 独立 review 曾尝试启动，但在模型列表刷新阶段超时，未形成有效 review 结论；不能计作独立 AI 审计 PASS。
 
 当前 live 状态详见 `CURRENT_STATE_AUDIT.md`。特别是：journal 的 8656 registry values 中已有 278 与当前系统不同，其中 267 是 F:→D: 路径漂移，所以不能把 `status=complete` 当成“最新代码已通过真机验收”。
 
