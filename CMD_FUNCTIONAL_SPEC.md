@@ -426,3 +426,187 @@ Phase 1 不在这里决定 Python 必须怎样实现，只负责把事实搞清�
 9. `:BACKUP` / `:RECOVERY`；
 10. 将制包工具链与运行时安装职责彻底分开。
 
+---
+
+## 8. 注册表模板职责地图
+
+已使用只读工具对 7 个 `.dli` 做结构盘点。这里记录的是**用途分区**，不是要求 Python 整份导入。
+
+### `reg1.dli` — 用户侧 AutoCAD 配置
+
+- 1887 行；
+- 322 个 registry section；
+- 全部落在 `HKCU\SOFTWARE\Autodesk\AutoCAD\R24.3...`；
+- 主要承担用户 profile、图形设置、路径、历史用户状态等。
+
+**判断：**这里混有“AutoCAD 能工作所需默认值”和“抓包机器上的用户状态”。Python 后续不能把整份 `reg1.dli` 当产品规范。
+
+### `reg2.dli` — AutoCAD HKLM 产品/应用注册
+
+- 12504 行；
+- 2479 个 section；
+- 全部位于 `HKLM\SOFTWARE\Autodesk\AutoCAD\R24.3...`；
+- 包含大量 AutoCAD Applications 注册。
+
+已确认 `AcadVBA` 在这里：
+
+- `DESCRIPTION = AcVBA Command Module`
+- `LOADCTRLS = 0x0d`
+- `LOADER = C:\Program Files\Autodesk\ApplicationPlugins\AcVBA2024.Bundle\Contents\AcVBA.arx`
+- Commands 包含 `VBAIDE`、`VBALOAD`、`VBAUNLOAD`。
+
+`AcadLocation` 也在 `reg2.dli` 中，制包时记录为作者机器的 AutoCAD 路径，安装时由 CMD 动态替换。
+
+**判断：**这是 Python 后续定义“AutoCAD 核心 HKLM 注册”的主要事实来源，但需要按应用/功能裁剪。
+
+### `reg3.dli` — 系统级集成集合
+
+- 19640 行；
+- 5591 个 section；
+- 涵盖 HKCU Classes、HKLM Classes、COM、TypeLib、Windows Installer、Shell Extension 等多个系统域。
+
+已确认它包含 AcSign Shell 集成，例如：
+
+- `AcSignExt` CLSID → `C:\Windows\system32\AcSignExt.dll`
+- `AcSignIcon` CLSID → `AcSignIcon.dll`
+- 多种文件类型的 `Enable/Disable Digital Signature Icons` shell command → `acsignopt.exe`
+
+同时还有大量 Windows Installer / Package Cache / 其他安装器历史记录。
+
+**判断：**`reg3.dli` 不能作为一个整体进入 Python MVP。必须拆成“文件关联”“AutoCAD COM”“Shell/AcSign”“Installer 历史”等职责；后两类尤其不能盲目复制。
+
+### `reg4.dli` — 小型补充状态
+
+- 81 行；
+- 25 个 section；
+- 包含一个 TypeLib、部分当前用户 profile / Applications / GPU Preference 等补充状态。
+
+**判断：**更像抓包后的补丁型差量，而不是独立核心注册模板。Phase 2 默认不把它整体视为必需。
+
+### `regedge.dli` — WebView2 EdgeUpdate 状态
+
+- 30 行；
+- 只有 3 个 section；
+- 全部位于 EdgeUpdate `ClientState`。
+
+模板声明 WebView2 版本 `115.0.1901.188`，并引用：
+
+- `Installer\setup.exe`；
+- `Application\msedge.exe`；
+- `EBWebView` 根路径。
+
+但当前 `auedgewebview.dll` 归档只有 3 个文件，并**不包含**前两者。
+
+**判断：**旧包不是一个自洽的完整 WebView2 Runtime 安装源。Python 不应通过导入 `regedge.dli` 假装完整 Runtime 已安装。
+
+### `vba.dli` — VBA Enabler + Microsoft Forms + Installer 痕迹
+
+- 5836 行；
+- 1460 个 section；
+- 混合了：
+  - AutoCAD VBA Enabler 状态；
+  - VBA / VBE TypeLib；
+  - Microsoft Forms 2.0 COM 类；
+  - `FM20.DLL` TypeLib / Interface / CLSID；
+  - Windows Installer 产品/组件记录。
+
+已确认标准 `Forms.*` ProgID（包括 `Forms.Form.1`、Button、TextBox、ListBox、ComboBox 等）及大量 `Forms.HTML:*` 类型。
+
+Microsoft Forms 2.0 TypeLib 明确指向 `C:\Windows\system32\FM20.DLL`。
+
+**判断：**`vba.dli` 不是“一个 VBA 注册表文件”这么简单，它更像从官方 VBA Enabler 安装状态抓出的广泛快照。Python 后续应围绕“AutoCAD VBA 能实际运行”定义最小职责，而不是导入全部 Installer 痕迹。
+
+### `unreg.dli` — 大范围删除模板
+
+- 4161 行；
+- 2066 个 section；
+- 其中 **2006 个是删除 section**。
+
+删除范围覆盖：
+
+- Windows Installer Products / Features / UpgradeCodes / Components；
+- COM / Interface / CLSID；
+- Autodesk Installer；
+- Forms.*；
+- Shell Extension；
+- AcSign 等。
+
+**判断：**这是旧作者为了“彻底清理抓包安装状态”生成的大型删除清单，不适合作为 Python 卸载规范。Python 卸载应优先删除自己明确创建的状态。
+
+---
+
+## 9. 归档载荷职责地图
+
+使用 `py7zr` 只读列目录，没有向系统解包。
+
+### `default.dll`
+
+- 3 个文件；
+- 就是 `reg1.dli / reg2.dli / reg3.dli`。
+
+因此它本质上是“默认注册模板快照”。
+
+### `guanfang.dll`
+
+- 169 个文件；
+- 22 个目录；
+- 未压缩总量约 9.8 MB；
+- 主要是 CHS 下的 Support、Template、Plotters、Data Links 等官方/初始用户数据。
+
+其中明确包含 `Support/Sample.cus`。
+
+因此它本质上是“CHS 出厂基线包”。
+
+### `Tohomedrive.dll`
+
+仅 8 个文件：
+
+- System32：`plotman.cpl`、`styleman.cpl`、`AcSignExt.dll`、`AcSignExtRes.dll`、`AcSignIcon.dll`、`AcSignOpt.exe`
+- SysWOW64：`FM20.DLL`、`FM20chs.DLL`
+
+**判断：**这个包把至少三类职责混在一起：打印/样式管理、数字签名 Shell、Forms 共享组件。Python 不应继续把它当单一功能整包部署。
+
+### `app/VBA.dll`
+
+- 17 个文件；
+- 约 23 MB；
+- 包含：
+  - `AcVBA2024.Bundle`（`AcVba.arx`、`PackageContents.xml`、图标）；
+  - VBA7.1 核心及中英文资源；
+  - `VBE6EXT.OLB`；
+  - System32 下的 `FM20.DLL / FM20chs.DLL / FM20enu.DLL`。
+
+**判断：**这个包至少覆盖 AutoCAD VBA 插件、VBA Runtime、Microsoft Forms 三个子职责，应分别定义验收。
+
+### `app/auedgewebview.dll`
+
+只有 3 个文件：
+
+- `msedgewebview2.exe.sig`
+- `EBWebView/x64/EmbeddedBrowserWebView.dll`
+- `msedgewebview2.exe`
+
+**判断：**这是一个不完整的 Runtime 片段，不能单独支撑 `regedge.dli` 声明的完整 EdgeUpdate 安装状态。
+
+---
+
+## 10. 当前包中的可选/空操作职责
+
+已扫描当前目录：
+
+- 不存在 `installser.cmd`；
+- 不存在 `unstallser.cmd`；
+- 不存在 `myapp.cmd`；
+- 不存在 `unmyapp.cmd`；
+- 不存在 `0自定义配置文件` 目录。
+
+因此这些 CMD 调用/复制动作在**当前这个 AutoCAD 2024.1.9 绿色完整版**中属于可选扩展点或静默 no-op，不能因为 CMD 中写了调用就自动列为当前产品必需功能。
+
+另外：
+
+`list.dll` 只有 22 字节，UTF-16 内容实际上只有：
+
+`acad.exe`
+
+所以当前“检测程序完整性=1”只证明主 `acad.exe` 存在，并不是严格意义上的完整性验证。
+
