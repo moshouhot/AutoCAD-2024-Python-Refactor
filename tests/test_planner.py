@@ -58,11 +58,34 @@ def make_package(root: Path) -> PackageLayout:
 [HKEY_CURRENT_USER\SOFTWARE\Classes\AutoCAD.Application.24\CLSID]
 @="{8B4929F8-076F-4AEC-AFEE-8928747B7AE3}"
 
+[HKEY_CURRENT_USER\SOFTWARE\Classes\AutoCAD.ApplicationExtra]
+@="must-not-enter-core"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\AutoCAD.Application.24Extra]
+@="must-not-enter-core"
+
 [HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{8B4929F8-076F-4AEC-AFEE-8928747B7AE3}\LocalServer32]
 @="D:\\00\\AutoCAD 2024\\AutoCAD 2024\\acad.exe /Automation"
 
 [HKEY_LOCAL_MACHINE\SOFTWARE\Classes\TypeLib\{AA9A2205-75AA-43AD-9138-1767F1BB5E0C}\1.0\0\win32]
 @="D:\\00\\AutoCAD 2024\\AutoCAD 2024\\Autodesk Shared\\acax24enu.tlb"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{E89B39BB-5AE4-4C52-9011-B70FC663F249}]
+@="AcadObject"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{E89B39BB-5AE4-4C52-9011-B70FC663F249}\InProcServer32]
+@="axdb.dll"
+"ThreadingModel"="Apartment"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{E89B39BB-5AE4-4C52-9011-B70FC663F249}Extra]
+@="must-not-enter-core"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{E8B0B8B1-FC46-4358-8DDE-217554361CB0}]
+@="AcadWipeout"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{E8B0B8B1-FC46-4358-8DDE-217554361CB0}\InProcServer32]
+@="axdb.dll"
+"ThreadingModel"="Apartment"
 
 [HKEY_LOCAL_MACHINE\SOFTWARE\Classes\MicrosoftEdge.Fake]
 @="must-not-enter-core"
@@ -113,6 +136,12 @@ def test_planner_rebases_paths_and_allowlists_registry(tmp_path: Path) -> None:
     assert all(op.name != "SessionStartCount" for op in registry_values)
     assert any(op.name == "KeepMe" for op in registry_values)
     assert any("AutoCAD.Application" in op.key for op in registry_values)
+    assert any("AutoCAD.Application.24\\CLSID" in op.key for op in registry_values)
+    assert all("AutoCAD.ApplicationExtra" not in op.key for op in registry_values)
+    assert all("AutoCAD.Application.24Extra" not in op.key for op in registry_values)
+    assert any("{E89B39BB-5AE4-4C52-9011-B70FC663F249}" in op.key for op in registry_values)
+    assert all("{E89B39BB-5AE4-4C52-9011-B70FC663F249}Extra" not in op.key for op in registry_values)
+    assert all("{E8B0B8B1-FC46-4358-8DDE-217554361CB0}" not in op.key for op in registry_values)
     assert all("MicrosoftEdge.Fake" not in op.key for op in registry_values)
 
     com_server = next(
@@ -138,6 +167,31 @@ def test_planner_rebases_paths_and_allowlists_registry(tmp_path: Path) -> None:
     actual_support = str(acad_path.data).replace("/", "\\")
     assert actual_support == expected_support
     assert not plan.warnings
+
+
+def test_planner_includes_only_traced_acadobject_clsid(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    plan = InstallPlanner(layout).build()
+    registry_values = [op for op in plan.operations if isinstance(op, SetRegistryValue)]
+
+    target = [
+        op
+        for op in registry_values
+        if "{E89B39BB-5AE4-4C52-9011-B70FC663F249}" in op.key
+    ]
+    assert {(op.name, op.data) for op in target} == {
+        ("", "AcadObject"),
+        ("", "axdb.dll"),
+        ("ThreadingModel", "Apartment"),
+    }
+    assert all(
+        "{E8B0B8B1-FC46-4358-8DDE-217554361CB0}" not in op.key
+        for op in registry_values
+    )
+    assert all(
+        "{E89B39BB-5AE4-4C52-9011-B70FC663F249}Extra" not in op.key
+        for op in registry_values
+    )
 
 
 def test_planner_builds_chs_junctions_and_shortcuts(tmp_path: Path) -> None:

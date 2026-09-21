@@ -28,7 +28,8 @@
 - [x] Core plan 不包含 System32/SysWOW64 写入。
 - [x] Core 排除了 HKCU 历史插件状态和 `AcadVBA`，避免尚未部署的 loader 悬空。
 - [x] Core 中计划写入的 AutoCAD Application loader 全部有实际目标或明确虚拟协议。
-- [ ] 在新的可信 live baseline 上验证 `DwgCommon / Drawing Check / Hardcopy / ObjectDBX` 候选组是否全部必需；当前不把它们宣称为“最小集合”。
+- [x] 当前 Core allowlist 已在 clean-host live 环境证明**足以启动和操作 AutoCAD 2024**。
+- [ ] `DwgCommon / Drawing Check / Hardcopy / ObjectDBX` 是否每一组都属于“最小必需集合”仍未逐组证明；这是后续最小化问题，不阻断 MVP-A 功能验收。
 
 ## D. P3 Fake install
 
@@ -42,7 +43,7 @@
 
 ## E. Non-live regression
 
-- [x] 当前全量 pytest PASS（39 passed）。
+- [x] 当前全量 pytest PASS（41 passed）。
 - [x] 所有 Phase 1 静态分析工具可重复运行。
 - [x] GitHub CI：`d74ce5e` 在 Windows 3.11 / 3.14、Ubuntu 3.11 / 3.14 四矩阵全部 PASS（run `35570091621`）。
 - [x] GitHub CodeQL：Python analysis PASS（run `35570091637`）。
@@ -61,45 +62,59 @@
 - [x] Windows 临时目录实测：真实 Junction 创建/读取/移除 PASS。
 - [x] Windows 临时目录实测：真实 `.lnk` 创建 PASS。
 - [x] Windows 临时目录实测：dangling Junction 被识别为已有 reparse path 并 fail-closed。
-- [x] `status` 可只读报告 installer journal；当前真实包状态为 `exists=false`，证明尚未执行 Python live install。
-- [x] live diff 为只读：当前 Core 目标 registry `same=0 / change=0 / create=8528 / keys_create=2769`；两个 CHS Junction 均为新建；shortcut 为 2 existing + 1 create。
+- [x] `status` 可只读报告 installer journal；最终 clean-host 验收前后均实测。
+- [x] 最终候选 fresh install 后 live diff：registry `8656 same / 0 change / 0 create`；2 Junction same；3 shortcut existing。
 - [x] Trial 1 真实 apply 在 redirected Desktop 处失败后，journal 回滚实测删除 8528 本轮新值 + 2 Junction，0 conflict，并恢复到执行前 live diff。
 - [x] Desktop 解析已修正为 `User Shell Folders` 优先，且 shortcut parent 非目录会在 plan audit 阶段阻断。
-- [ ] 真实 Windows `--apply` 尚未执行。
+- [x] 真实 Windows `install --apply` / repeat install / `uninstall --apply` 已在 clean-host 环境完成闭环。
 
 ### 当前真实包 non-live 证据
 
-- Core plan operations：**11,554**
+- Core plan operations：**11,559**
 - plan warnings：0
 - independent audit findings：0
 - FakeWindows 两次 apply：幂等（历史已验证）
 - Windows read-only preflight：管理员=True，.NET Release=533325，Auto-load=ready
 
-### 当前 live state 更正
+### 最新 clean-host live 证据
 
-当前不能再使用旧的“registry 与 plan 完全一致”结论：
+旧 D:/E:/F: 混合状态已经被专用 clean-host 验收取代；历史漂移仍保留在 `CURRENT_STATE_AUDIT.md`，但不再代表当前候选状态。
 
-- installer journal：`status=complete`，registry journal **8656**；
-- journal vs current registry：**8378 same / 278 changed / 0 missing**；
-- 278 changed 中 **267 是明确 F:→D:**；另有 E: 历史用户路径；
-- 当前 HKLM `AcadLocation` 指向 D: 的既有 AutoCAD 2024 环境；
-- 最新 plan 对当前 live registry：**8375 same / 278 change / 0 create**。
+live-tested 实现基线 `a46c33b`：
 
-因此当前 live state 只能判为 **DRIFTED / BLOCKED**，不能作为最新 F: Core PASS 证据。详见 `CURRENT_STATE_AUDIT.md`。
+- 当时 pytest：**40 passed**；
+- plan：**11,559 operations / 0 warnings / 0 audit findings**；
+- fresh install：**11,558 actual operations**，0 conflict；
+- install 后 diff：**8656 same / 0 change / 0 create**；
+- 真机 `acad.exe`：进入 `Autodesk AutoCAD 2024 - [Drawing1.dwg]`；
+- image path：当前 F: 项目 `acad.exe`；
+- COM 命令：`USERR1 0 -> 12.345 -> 0`；
+- autoload：测试 LSP 自动生成 `__mvp_a_autoload_marker.txt`；
+- repeat install：PASS，diff 再次归零；
+- uninstall：registry restored=1 / removed=8655，shortcuts restored=2 / removed=1，junctions removed=2，**conflicts=0**；
+- uninstall 后 `AcadObject` CLSID 与 HKLM R24.3 均不存在，installer state 不存在；
+- HKCU 保留的 36 keys / 80 values 为 AutoCAD 运行时及外部 ApplicationPlugins 写入状态，符合 owned-uninstall 契约。
+
+PR #2 reviewer 边界加固后：
+
+- 当前 pytest：**41 passed**；
+- plan 仍为 **11,559 operations / 0 warnings / 0 findings**；
+- 旧裸前缀语义与新“exact-or-descendant”语义在真实 `reg3.dli` 上均选择 **126 sections**，集合完全相同；
+- 因此加固未改变已完成 live 验收的实际 registry plan，只阻止未来同前缀兄弟键误入 Core。
 
 ## F. MVP-A 真机验收
 
-- [ ] 先取得不受 D:/E: 既有环境回写影响的可信 live baseline。
-- [ ] Python Core install 成功。
-- [ ] AutoCAD 2024 启动到可操作状态。
-- [ ] 运行中 image path 为当前绿色包 `acad.exe`。
-- [ ] 关键 AutoCAD 命令可执行。
-- [ ] AppData / LocalAppData CHS 均解析到正确目标。
-- [ ] 当前 CHS 用户状态未被普通安装 reset。
+- [x] 已取得不受旧 D:/E: CAD 2024 注册状态影响的 clean-host baseline。
+- [x] Python Core install 成功。
+- [x] AutoCAD 2024 启动到可操作状态（`Drawing1.dwg`）。
+- [x] 运行中 image path 为当前绿色包 `acad.exe`。
+- [x] 关键 AutoCAD 命令可执行（COM `SETVAR` 实测）。
+- [x] AppData / LocalAppData CHS 均由 installer journal 指向当前 `ACAOE/CHS`。
+- [x] 普通安装未执行 CHS recovery/reset。
 - [ ] desktop shortcut 可正常启动。
-- [ ] `0加载应用程序` 测试 LSP 自动加载成功。
-- [ ] 重复 install 可用。
-- [ ] Core uninstall 不进行大范围共享状态清理。
+- [x] `0加载应用程序` 测试 LSP 自动加载成功。
+- [x] 重复 install 可用且恢复 plan 状态。
+- [x] Core uninstall 只清理 ownership journal 管理状态，0 conflict；未进行大范围共享状态清理。
 
 ## G. VBA（MVP-B）
 

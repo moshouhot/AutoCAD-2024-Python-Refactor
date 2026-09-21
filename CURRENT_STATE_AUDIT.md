@@ -1,4 +1,6 @@
-# Current Live State Audit
+# Historical Live State Audit
+
+> **SUPERSEDED:** 本文记录的是早期 D:/E:/F: 混合状态，已被 `LIVE_TRIALS.md` Trial 4/5/6 的 clean-host 验收取代。不要把本文的 `LIVE BLOCKED` 结论当成当前候选状态。
 
 > 2026-09-21，只读审计。本文档描述当前机器状态，不执行任何系统写入。
 

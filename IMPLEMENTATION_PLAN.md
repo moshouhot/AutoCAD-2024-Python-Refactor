@@ -57,7 +57,7 @@
 
 ## P4 — Real Windows adapter
 
-状态：**代码完成；历史上已执行过真实 Core apply，但最终 live 验收尚未完成**。
+状态：**代码 + clean-host live 闭环完成**。
 
 实现最小真实操作：
 
@@ -68,7 +68,7 @@
 
 不得增加 System32 / WebView2 / AcSign 写入。
 
-历史 live apply 已产生 `.python-installer-state.json`，并验证过 journal/rollback 的部分真实行为；但当前主机随后发生大规模 registry 漂移，因此这些历史 apply 只作为实现证据，不能作为最终 MVP-A PASS。
+历史漂移证据继续保留；最终验收已在用户卸载本机旧 CAD 2024 后建立的 clean-host baseline 上重新执行，不再依赖旧 journal。
 
 ## P5 — Local non-live acceptance
 
@@ -76,8 +76,8 @@
 
 当前证据：
 
-- 39 passed；
-- real package plan **11,554 operations**；
+- 41 passed；
+- real package plan **11,559 operations**；
 - warnings 0；
 - audit findings 0；
 - FakeWindows repeat apply 幂等；
@@ -94,7 +94,7 @@
 
 ## P6 — 真机 AutoCAD Core 验证
 
-状态：**BLOCKED（当前机器 live state 已漂移）**。操作边界和证据要求见 `LIVE_ACCEPTANCE.md` 与 `CURRENT_STATE_AUDIT.md`。
+状态：**完成（clean-host live PASS）**。完整证据见 `LIVE_TRIALS.md` Trial 4/5/6 与 `LIVE_ACCEPTANCE_REPORT.md`。
 
 由本地 AI 只承担无法由当前工具可靠完成的真实 GUI/AutoCAD 操作：
 
@@ -106,13 +106,21 @@
 
 本地 AI 只返回证据，不自行扩大范围。
 
-当前机器曾出现一次 `status=complete` 的真实 Core apply，但其后 registry 大量从 F: 漂移回 D:/E:：当前 journal 8656 values 中有 278 与 live 不同，其中 267 为明确 F:→D: 路径漂移。因此这台机器当前不能作为 F: Core 的单一来源验收基线，也不应直接再次 apply/uninstall 来“修平”差异。
+最终 clean-host 结果：
 
-最终 live 验收改在**一个长期独立的 CAD 2024 测试 Windows 环境**完成。无需为每轮测试创建快照；要求只是这个环境不承载需要保留的其他 AutoCAD 2024 状态，并在每轮验收前做只读 baseline 核验。
+- fresh install PASS；
+- `AcadObject` CLSID 单变量 A/B 找到并修复启动 blocker；
+- `acad.exe` 进入 `Drawing1.dwg`；
+- COM 命令 PASS；
+- autoload marker PASS；
+- repeat install PASS；
+- owned uninstall 0 conflict。
 
 ## P7 — Core 审计收口
 
-公开 PR + 第三方审计。
+状态：**待执行**。
+
+公开 PR + Codex / Sourcery / CI / CodeQL 第三方审计。
 
 修复 Core 问题后锁定 MVP-A。
 

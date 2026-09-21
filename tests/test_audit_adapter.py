@@ -4,8 +4,8 @@ from pathlib import Path
 
 from acad_portable.adapters import FakeWindowsAdapter
 from acad_portable.audit import validate_core_plan
-from acad_portable.ops import CreateShortcut
-from acad_portable.planner import InstallPlan
+from acad_portable.ops import CreateShortcut, EnsureRegistryKey
+from acad_portable.planner import AUTOCAD_REG3_CORE_PREFIXES, InstallPlan
 from acad_portable.planner import InstallPlanner, KnownFolders
 
 from test_planner import make_package
@@ -55,3 +55,20 @@ def test_plan_audit_rejects_shortcut_parent_that_is_a_file(tmp_path: Path) -> No
     )
     findings = validate_core_plan(plan, layout)
     assert any(item.code == "SHORTCUT_PARENT_NOT_DIRECTORY" for item in findings)
+
+
+def test_plan_audit_rejects_same_prefix_registry_sibling(tmp_path: Path) -> None:
+    layout = make_package(tmp_path)
+    traced = next(
+        prefix
+        for prefix in AUTOCAD_REG3_CORE_PREFIXES
+        if "E89B39BB-5AE4-4C52-9011-B70FC663F249" in prefix
+    )
+    plan = InstallPlan(
+        operations=(EnsureRegistryKey(traced + "Extra"),),
+        warnings=(),
+        metadata={},
+    )
+
+    findings = validate_core_plan(plan, layout)
+    assert any(item.code == "REGISTRY_ROOT" for item in findings)
