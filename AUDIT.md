@@ -59,7 +59,7 @@ python -m pytest -q
 
 当前真实包只读/非 live 基线：
 
-- plan operations：11,305
+- plan operations：**11,554**
 - plan warnings：0
 - independent plan audit findings：0
 - FakeWindows 两次 apply：幂等
@@ -109,11 +109,14 @@ python -m pytest -q
 
 当前不能宣称产品完成：
 
-- 尚未执行 Core `install --apply`；
-- 尚未启动真实 AutoCAD 做 GUI/命令验收；
+- 历史上已经出现过 Core live apply，但成功执行的完整 provenance 不全，且当前 live registry 已发生大规模后续漂移；
+- 尚未取得一个可作为最终证据的、稳定且单一来源的 F: Core 真机基线；
+- 真实 AutoCAD 启动曾进入“AutoCAD 错误中断”，后续补了 COM/core registration 候选层，但尚未在干净基线上完成重新验收；
 - 尚未验证 `0加载应用程序` 的真实启动时加载；
 - VBA 属于后续 MVP-B；
-- 公开 GitHub 仓库尚待创建并运行远端 CI / CodeQL。
+- 公开 GitHub 仓库已经创建；远端 CI / CodeQL 结果仍需作为独立证据检查。
+
+当前 live 状态详见 `CURRENT_STATE_AUDIT.md`。特别是：journal 的 8656 registry values 中已有 278 与当前系统不同，其中 267 是 F:→D: 路径漂移，所以不能把 `status=complete` 当成“最新代码已通过真机验收”。
 
 第三方审计应允许结论为 `BLOCKED` / `FAIL`，不得因为当前单元测试全绿而直接认定产品完成。
 

@@ -65,14 +65,27 @@
 
 ### 当前真实包 non-live 证据
 
-- Core plan operations：11,305
+- Core plan operations：**11,554**
 - plan warnings：0
 - independent audit findings：0
-- FakeWindows 两次 apply：幂等
+- FakeWindows 两次 apply：幂等（历史已验证）
 - Windows read-only preflight：管理员=True，.NET Release=533325，Auto-load=ready
+
+### 当前 live state 更正
+
+当前不能再使用旧的“registry 与 plan 完全一致”结论：
+
+- installer journal：`status=complete`，registry journal **8656**；
+- journal vs current registry：**8378 same / 278 changed / 0 missing**；
+- 278 changed 中 **267 是明确 F:→D:**；另有 E: 历史用户路径；
+- 当前 HKLM `AcadLocation` 指向 D: 的既有 AutoCAD 2024 环境；
+- 最新 plan 对当前 live registry：**8375 same / 278 change / 0 create**。
+
+因此当前 live state 只能判为 **DRIFTED / BLOCKED**，不能作为最新 F: Core PASS 证据。详见 `CURRENT_STATE_AUDIT.md`。
 
 ## F. MVP-A 真机验收
 
+- [ ] 先取得不受 D:/E: 既有环境回写影响的可信 live baseline。
 - [ ] Python Core install 成功。
 - [ ] AutoCAD 2024 启动到可操作状态。
 - [ ] 运行中 image path 为当前绿色包 `acad.exe`。

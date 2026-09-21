@@ -46,3 +46,7 @@ dist/
 *.tmp
 *.bak
 
+# Local AI / live-probe scratch state
+.spec-workflow/
+live_autoload_probe.scr
+

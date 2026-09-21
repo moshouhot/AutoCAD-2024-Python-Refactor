@@ -91,7 +91,7 @@
 
 ## P6 — 真机 AutoCAD Core 验证
 
-状态：**待执行**。操作边界和证据要求见 `LIVE_ACCEPTANCE.md`。
+状态：**BLOCKED（当前机器 live state 已漂移）**。操作边界和证据要求见 `LIVE_ACCEPTANCE.md` 与 `CURRENT_STATE_AUDIT.md`。
 
 由本地 AI 只承担无法由当前工具可靠完成的真实 GUI/AutoCAD 操作：
 
@@ -102,6 +102,8 @@
 - 验证 test LSP 自动加载。
 
 本地 AI 只返回证据，不自行扩大范围。
+
+当前机器曾出现一次 `status=complete` 的真实 Core apply，但其后 registry 大量从 F: 漂移回 D:/E:：当前 journal 8656 values 中有 278 与 live 不同，其中 267 为明确 F:→D: 路径漂移。因此这台机器当前不能作为 F: Core 的单一来源验收基线，也不应直接再次 apply/uninstall 来“修平”差异。
 
 ## P7 — Core 审计收口
 
