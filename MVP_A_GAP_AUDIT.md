@@ -74,15 +74,17 @@ MVP-A 的代码、non-live 和主要 live 功能闭环已经完成。clean-host 
 
 ---
 
-## 下一阶段门槛
+## 最终状态与后续边界
 
-代码层面的下一步不是继续扩大功能，而是：
+MVP-A 已完成代码、non-live、live 和最终第三方审计闭环：
 
-1. 维持 Core plan `warnings = 0 / audit findings = 0`；
-2. CI / CodeQL 保持全绿；
-3. 在专用 CAD 2024 测试环境建立只读 baseline；
-4. 集中执行一次完整 live acceptance：install → AutoCAD 启动 → CHS → shortcut → auto-load → repeat install → uninstall；
-5. 只有真实运行暴露明确缺口时，才继续调整 Core allowlist。
+1. pytest：**41 passed**；
+2. Core plan：**11,559 operations / 0 warnings / 0 findings**；
+3. clean-host live：fresh install → AutoCAD 启动 → COM 命令 → autoload → repeat install → owned uninstall 全部 PASS；
+4. PR #2：CI / CodeQL / Sourcery / Codex 对最终 `36bafb0` 均完成；
+5. PR #2 已合并到 `main`，merge commit `23f1075a4e1bbd0cde0ce88e35772adf2b69c4ef`。
 
-当前状态：`MVP-A = CODE/NON-LIVE/LIVE CORE READY, THIRD-PARTY AUDIT PENDING`。
+当前状态：`MVP-A = CORE CLOSED`。
+
+仍然不把以下内容冒充为已完成：desktop shortcut 的单独直接点击测试、每个 selected reg3 组的最小必要性证明、VBA/MVP-B。
 

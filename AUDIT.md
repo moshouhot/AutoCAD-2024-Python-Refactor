@@ -116,9 +116,9 @@ python -m pytest -q
 - desktop shortcut 的**直接点击启动**未单独作为一项执行；shortcut 创建/ownership 和目标契约已有 non-live + journal 证据；
 - `DwgCommon / Drawing Check / Hardcopy / ObjectDBX` 是否每一组都属于“最小必要集合”未逐组做删减实验；
 - VBA 属于后续 MVP-B；
-- 本 live-acceptance 分支尚需新的公开 PR、CI、CodeQL、Sourcery、Codex 对**最终 SHA**复审。
+- 这些剩余项均不再作为 MVP-A Core blocker。
 
-第三方审计仍应允许结论为 `BLOCKED` / `FAIL`；不得因为 live 通过就跳过源码/证据审计。
+最终第三方审计已经完成：PR #2 final reviewed SHA `36bafb0`，CI/CodeQL/Sourcery/Codex 均通过，并已合并为 `23f1075a4e1bbd0cde0ce88e35772adf2b69c4ef`。
 
 ## 6. 主审计补充：volatile registry state
 

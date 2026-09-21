@@ -483,5 +483,5 @@ journal cardinality 保持：
 
 > **MVP-A Core live functional closure = PASS.**
 
-当前不再存在已知 Core 启动 blocker。剩余工作是最终分支第三方审计，以及后续是否继续做 allowlist 最小化；VBA 属于 MVP-B。
+当前不再存在已知 Core 启动 blocker。后续 PR #2 已完成 CI / CodeQL / Sourcery / Codex 最终审计并合并到 `main`；MVP-A Core 至此闭环。allowlist 进一步最小化与 VBA 均属于后续工作，不影响本结论。
 
