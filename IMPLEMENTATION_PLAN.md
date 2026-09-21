@@ -74,12 +74,13 @@
 
 当前证据：
 
-- 27 passed；
+- 28 passed；
 - real package plan 11,305 operations；
 - warnings 0；
 - audit findings 0；
 - FakeWindows repeat apply 幂等；
 - Windows temp Junction / shortcut 实测通过。
+- read-only live diff：0 registry overwrite，8528 values / 2769 keys 待新建。
 
 - 全量 pytest；
 - dry-run plan；

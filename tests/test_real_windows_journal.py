@@ -166,3 +166,31 @@ def test_shortcut_journal_preserves_external_change(tmp_path: Path, monkeypatch)
     assert len(report.conflicts) == 1
     assert shortcut.read_bytes() == b"external-change"
     assert state_path.exists()
+
+
+def test_live_diff_classifies_registry_without_writing(tmp_path: Path, monkeypatch) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R24.3"
+    memory.keys.add(key)
+    memory.values[(key, "Same")] = {"type": 1, "data": "same"}
+    memory.values[(key, "Change")] = {"type": 1, "data": "old"}
+
+    plan = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Same", "sz", "same"),
+            SetRegistryValue(key, "Change", "sz", "new"),
+            SetRegistryValue(key, "Create", "dword", 1),
+            WriteInstallState(tmp_path / "state.json", {"test": True}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    report = rw.inspect_live_diff(plan)
+    assert report.registry_same == 1
+    assert report.registry_change == 1
+    assert report.registry_create == 1
+    assert memory.values[(key, "Change")]["data"] == "old"
+    assert not (tmp_path / "state.json").exists()

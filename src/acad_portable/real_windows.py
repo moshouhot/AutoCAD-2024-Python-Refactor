@@ -41,6 +41,89 @@ class UninstallReport:
     conflicts: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class LiveDiffReport:
+    registry_same: int
+    registry_change: int
+    registry_create: int
+    registry_keys_create: int
+    junction_same: int
+    junction_create: int
+    junction_conflict: int
+    shortcut_existing: int
+    shortcut_create: int
+    details: tuple[str, ...]
+
+
+def inspect_live_diff(plan: InstallPlan) -> LiveDiffReport:
+    """Compare a Core plan to the current Windows state without modifying it."""
+    if os.name != "nt":
+        raise RuntimeError("live diff requires Windows")
+
+    registry_same = 0
+    registry_change = 0
+    registry_create = 0
+    registry_keys_create = 0
+    junction_same = 0
+    junction_create = 0
+    junction_conflict = 0
+    shortcut_existing = 0
+    shortcut_create = 0
+    details: list[str] = []
+
+    for operation in plan.operations:
+        if isinstance(operation, EnsureRegistryKey):
+            if not _registry_key_exists(operation.key):
+                registry_keys_create += 1
+            continue
+
+        if isinstance(operation, SetRegistryValue):
+            current = _query_registry_value(operation.key, operation.name)
+            wanted = {
+                "type": _registry_kind(operation.kind),
+                "data": _encode_json_value(operation.data),
+            }
+            if current is None:
+                registry_create += 1
+            elif current == wanted:
+                registry_same += 1
+            else:
+                registry_change += 1
+                if len(details) < 100:
+                    details.append(f"REG_CHANGE {operation.key} [{operation.name}]")
+            continue
+
+        if isinstance(operation, EnsureJunction):
+            if not os.path.lexists(operation.path):
+                junction_create += 1
+            elif _same_path(operation.path, operation.target):
+                junction_same += 1
+            else:
+                junction_conflict += 1
+                if len(details) < 100:
+                    details.append(f"JUNCTION_CONFLICT {operation.path} -> {operation.target}")
+            continue
+
+        if isinstance(operation, CreateShortcut):
+            if operation.path.is_file():
+                shortcut_existing += 1
+            else:
+                shortcut_create += 1
+
+    return LiveDiffReport(
+        registry_same=registry_same,
+        registry_change=registry_change,
+        registry_create=registry_create,
+        registry_keys_create=registry_keys_create,
+        junction_same=junction_same,
+        junction_create=junction_create,
+        junction_conflict=junction_conflict,
+        shortcut_existing=shortcut_existing,
+        shortcut_create=shortcut_create,
+        details=tuple(details),
+    )
+
+
 class RealWindowsAdapter:
     def __init__(self, *, allow_non_windows_for_tests: bool = False) -> None:
         if os.name != "nt" and not allow_non_windows_for_tests:

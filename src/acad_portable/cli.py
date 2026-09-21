@@ -10,7 +10,7 @@ from .model import PackageError, PackageLayout
 from .ops import operation_to_dict
 from .planner import InstallPlanner
 from .preflight import inspect_preflight
-from .real_windows import RealWindowsAdapter, inspect_install_state
+from .real_windows import RealWindowsAdapter, inspect_install_state, inspect_live_diff
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     uninstall = sub.add_parser("uninstall", help="restore state owned by the Python installer")
     uninstall.add_argument("--apply", action="store_true", help="perform real Windows changes")
+
+    diff = sub.add_parser("diff", help="compare Core plan to current Windows state without writing")
+    diff.add_argument("--json", action="store_true")
     return parser
 
 
@@ -49,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
         return _install(layout, args.apply)
     if args.command == "uninstall":
         return _uninstall(layout, args.apply)
+    if args.command == "diff":
+        return _diff(layout, args.json)
     return 2
 
 
@@ -166,4 +171,47 @@ def _uninstall(layout: PackageLayout, apply: bool) -> int:
     for conflict in report.conflicts:
         print(f"  CONFLICT: {conflict}")
     return 0 if not report.conflicts else 1
+
+
+def _diff(layout: PackageLayout, as_json: bool) -> int:
+    plan = InstallPlanner(layout).build()
+    findings = validate_core_plan(plan, layout)
+    if plan.warnings or findings:
+        print(f"REFUSED: plan has {len(plan.warnings)} warnings and {len(findings)} audit findings")
+        return 2
+    report = inspect_live_diff(plan)
+    payload = {
+        "registry": {
+            "same": report.registry_same,
+            "change": report.registry_change,
+            "create": report.registry_create,
+            "keys_create": report.registry_keys_create,
+        },
+        "junctions": {
+            "same": report.junction_same,
+            "create": report.junction_create,
+            "conflict": report.junction_conflict,
+        },
+        "shortcuts": {
+            "existing": report.shortcut_existing,
+            "create": report.shortcut_create,
+        },
+        "details": list(report.details),
+    }
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(
+            "Registry     : "
+            f"same={report.registry_same} change={report.registry_change} "
+            f"create={report.registry_create} keys_create={report.registry_keys_create}"
+        )
+        print(
+            "Junctions    : "
+            f"same={report.junction_same} create={report.junction_create} conflict={report.junction_conflict}"
+        )
+        print(f"Shortcuts    : existing={report.shortcut_existing} create={report.shortcut_create}")
+        for detail in report.details[:20]:
+            print(f"  - {detail}")
+    return 0 if report.junction_conflict == 0 else 1
 
