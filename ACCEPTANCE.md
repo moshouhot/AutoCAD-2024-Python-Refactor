@@ -36,15 +36,25 @@
 - [x] wizard shortcut 目标正确。
 - [x] auto-load 链路存在且可被静态验证。
 - [x] FakeWindows 第二次执行产生完全相同的目标状态。
-- [ ] uninstall 只删除本工具拥有的状态。
+- [x] non-live ownership journal 已证明 uninstall 只恢复/删除本工具管理的 registry state；外部修改会转为 conflict 而不是覆盖。
 
 ## E. Non-live regression
 
-- [x] 当前全量 pytest PASS（14 passed）。
+- [x] 当前全量 pytest PASS（21 passed）。
 - [x] 所有 Phase 1 静态分析工具可重复运行。
 - [ ] `git status` 只含预期源码/文档变化（提交后复核）。
 - [x] 本轮未执行真实 CMD 安装器。
 - [x] 本轮未写 System32/SysWOW64。
+
+## E.1 P4 Real Windows Adapter（代码级）
+
+- [x] `install` 默认 dry-run，必须显式 `--apply` 才进入真实执行层。
+- [x] 真实 registry adapter 只支持 Core 已审计的 `REG_SZ / REG_EXPAND_SZ / REG_DWORD`。
+- [x] 创建 Junction 前对已有/悬空 reparse path fail-closed，不主动删除已有目录。
+- [x] shortcut 覆盖前保存原始字节；uninstall 只在当前文件仍等于本工具写入版本时恢复/删除。
+- [x] registry 写入前记录原值；重复 install 不覆盖最初 before-state。
+- [x] uninstall 遇到安装后外部修改会保留外部值并报告 conflict。
+- [ ] 真实 Windows `--apply` 尚未执行。
 
 ### 当前真实包 non-live 证据
 

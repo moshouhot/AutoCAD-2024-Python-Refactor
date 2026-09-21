@@ -10,6 +10,7 @@ from .model import PackageError, PackageLayout
 from .ops import operation_to_dict
 from .planner import InstallPlanner
 from .preflight import inspect_preflight
+from .real_windows import RealWindowsAdapter
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,6 +24,12 @@ def build_parser() -> argparse.ArgumentParser:
     plan = sub.add_parser("plan", help="build the Core MVP install plan without applying it")
     plan.add_argument("--json", action="store_true")
     plan.add_argument("--full", action="store_true", help="include every operation in JSON output")
+
+    install = sub.add_parser("install", help="validate Core plan; apply only with --apply")
+    install.add_argument("--apply", action="store_true", help="perform real Windows changes")
+
+    uninstall = sub.add_parser("uninstall", help="restore state owned by the Python installer")
+    uninstall.add_argument("--apply", action="store_true", help="perform real Windows changes")
     return parser
 
 
@@ -38,6 +45,10 @@ def main(argv: list[str] | None = None) -> int:
         return _status(layout, args.json)
     if args.command == "plan":
         return _plan(layout, args.json, args.full)
+    if args.command == "install":
+        return _install(layout, args.apply)
+    if args.command == "uninstall":
+        return _uninstall(layout, args.apply)
     return 2
 
 
@@ -109,4 +120,47 @@ def _plan(layout: PackageLayout, as_json: bool, full: bool) -> int:
         for finding in findings[:20]:
             print(f"  - {finding.code}: {finding.message}")
     return 0 if not plan.warnings and not findings else 1
+
+
+def _install(layout: PackageLayout, apply: bool) -> int:
+    plan = InstallPlanner(layout).build()
+    findings = validate_core_plan(plan, layout)
+    if plan.warnings or findings:
+        print(f"REFUSED: plan has {len(plan.warnings)} warnings and {len(findings)} audit findings")
+        return 2
+
+    preflight = inspect_preflight(layout)
+    if not preflight.windows or preflight.admin is not True or preflight.dotnet_47_or_newer is not True:
+        print("REFUSED: Windows/admin/.NET preflight is not satisfied")
+        return 2
+
+    if not apply:
+        print(f"DRY-RUN PASS: {len(plan.operations)} operations; no system changes made")
+        print("Run again with --apply only after reviewing `plan` output.")
+        return 0
+
+    report = RealWindowsAdapter().apply_plan(plan)
+    print(f"APPLIED: {report.operations} operations")
+    print(f"STATE: {report.state_path}")
+    return 0
+
+
+def _uninstall(layout: PackageLayout, apply: bool) -> int:
+    state_path = layout.acaoe / ".python-installer-state.json"
+    if not state_path.is_file():
+        print(f"No Python installer state found: {state_path}")
+        return 1
+    if not apply:
+        print(f"DRY-RUN: uninstall state exists at {state_path}; no changes made")
+        return 0
+    report = RealWindowsAdapter().uninstall(state_path)
+    print(
+        "UNINSTALL: "
+        f"registry restored={report.registry_restored}, removed={report.registry_removed}, "
+        f"shortcuts restored={report.shortcuts_restored}, removed={report.shortcuts_removed}, "
+        f"junctions removed={report.junctions_removed}, conflicts={len(report.conflicts)}"
+    )
+    for conflict in report.conflicts:
+        print(f"  CONFLICT: {conflict}")
+    return 0 if not report.conflicts else 1
 
