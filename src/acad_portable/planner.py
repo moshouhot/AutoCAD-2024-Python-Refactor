@@ -44,7 +44,7 @@ class KnownFolders:
         windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
         program_data = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
         public = Path(os.environ.get("PUBLIC", str(user.parent / "Public")))
-        desktop = Path(os.environ.get("USERPROFILE", str(user))) / "Desktop"
+        desktop = _desktop_folder(user)
         return cls(user, appdata, local, desktop, windows, program_data, public)
 
 
@@ -118,6 +118,7 @@ class InstallPlanner:
                 "legacy_path_prefixes": [old for old, _new in rebaser.mappings],
                 "autocad_root": str(self.layout.autocad_root),
                 "desktop_shortcut": config.enabled("桌面快捷方式", default=True),
+                "desktop": str(self.folders.desktop),
             },
         )
 
@@ -260,4 +261,33 @@ class InstallPlanner:
                 working_directory=self.layout.autocad_root,
             ),
         ]
+
+
+def _desktop_folder(user_profile: Path, *, windows: bool | None = None) -> Path:
+    """Resolve the actual Windows desktop, honoring User Shell Folders redirects."""
+    is_windows = os.name == "nt" if windows is None else windows
+    if is_windows:
+        try:
+            import winreg
+
+            for subkey in (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
+            ):
+                try:
+                    handle = winreg.OpenKey(winreg.HKEY_CURRENT_USER, subkey, 0, winreg.KEY_READ)
+                except FileNotFoundError:
+                    continue
+                try:
+                    value, _kind = winreg.QueryValueEx(handle, "Desktop")
+                except FileNotFoundError:
+                    continue
+                finally:
+                    winreg.CloseKey(handle)
+                resolved = os.path.expandvars(str(value)).strip()
+                if resolved:
+                    return Path(resolved)
+        except (ImportError, OSError):
+            pass
+    return user_profile / "Desktop"
 

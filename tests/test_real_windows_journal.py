@@ -194,3 +194,21 @@ def test_live_diff_classifies_registry_without_writing(tmp_path: Path, monkeypat
     assert report.registry_create == 1
     assert memory.values[(key, "Change")]["data"] == "old"
     assert not (tmp_path / "state.json").exists()
+
+
+def test_uninstall_skips_shortcut_that_never_finished_creation(tmp_path: Path, monkeypatch) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    state_path = tmp_path / "state.json"
+    shortcut = tmp_path / "missing-parent" / "AutoCAD 2024.lnk"
+    state = rw._new_state()
+    state["status"] = "failed"
+    state["shortcuts"][str(shortcut)] = {"before_base64": None}
+    rw._write_state(state_path, state)
+
+    report = rw.RealWindowsAdapter(allow_non_windows_for_tests=True).uninstall(state_path)
+
+    assert report.conflicts == ()
+    assert report.shortcuts_removed == 0
+    assert report.shortcuts_restored == 0
+    assert not state_path.exists()

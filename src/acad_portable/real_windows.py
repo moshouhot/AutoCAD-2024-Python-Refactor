@@ -186,6 +186,12 @@ class RealWindowsAdapter:
         for path_text, entry in reversed(list(state.get("shortcuts", {}).items())):
             path = Path(path_text)
             installed_sha = entry.get("installed_sha256")
+            if installed_sha is None:
+                # The operation was journaled before creation started, but it
+                # never reached a successful shortcut write. There is nothing
+                # to undo and restoring/deleting here could damage unrelated
+                # state.
+                continue
             current_sha = _file_sha256(path) if path.is_file() else None
             if current_sha != installed_sha:
                 conflicts.append(f"shortcut changed externally: {path}")

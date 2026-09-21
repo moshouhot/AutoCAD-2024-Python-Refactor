@@ -31,6 +31,7 @@
 - [`ACCEPTANCE.md`](ACCEPTANCE.md)：可观察的验收条件。
 - [`AUDIT.md`](AUDIT.md)：第三方审计入口、当前边界和重点问题。
 - [`LIVE_ACCEPTANCE.md`](LIVE_ACCEPTANCE.md)：本地 AI/真机操作员的 Core MVP 窄验收流程。
+- [`LIVE_TRIALS.md`](LIVE_TRIALS.md)：真实执行尝试、失败、回滚与修正记录。
 
 Phase 1 原则上不急着写 Python，先把旧安装器真正做了什么搞清楚。
 

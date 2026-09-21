@@ -40,7 +40,7 @@
 
 ## E. Non-live regression
 
-- [x] 当前全量 pytest PASS（28 passed）。
+- [x] 当前全量 pytest PASS（31 passed）。
 - [x] 所有 Phase 1 静态分析工具可重复运行。
 - [ ] `git status` 只含预期源码/文档变化（提交后复核）。
 - [x] 本轮未执行真实 CMD 安装器。
@@ -59,6 +59,8 @@
 - [x] Windows 临时目录实测：dangling Junction 被识别为已有 reparse path 并 fail-closed。
 - [x] `status` 可只读报告 installer journal；当前真实包状态为 `exists=false`，证明尚未执行 Python live install。
 - [x] live diff 为只读：当前 Core 目标 registry `same=0 / change=0 / create=8528 / keys_create=2769`；两个 CHS Junction 均为新建；shortcut 为 2 existing + 1 create。
+- [x] Trial 1 真实 apply 在 redirected Desktop 处失败后，journal 回滚实测删除 8528 本轮新值 + 2 Junction，0 conflict，并恢复到执行前 live diff。
+- [x] Desktop 解析已修正为 `User Shell Folders` 优先，且 shortcut parent 非目录会在 plan audit 阶段阻断。
 - [ ] 真实 Windows `--apply` 尚未执行。
 
 ### 当前真实包 non-live 证据

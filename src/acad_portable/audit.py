@@ -74,6 +74,10 @@ def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFi
         if isinstance(operation, CreateShortcut):
             _check_no_system_target(findings, operation.path, "SHORTCUT_SYSTEM")
             _check_no_system_target(findings, operation.target, "SHORTCUT_TARGET_SYSTEM")
+            if operation.path.parent.exists() and not operation.path.parent.is_dir():
+                findings.append(
+                    PlanFinding("SHORTCUT_PARENT_NOT_DIRECTORY", str(operation.path.parent))
+                )
             if not operation.target.exists():
                 findings.append(PlanFinding("SHORTCUT_TARGET_MISSING", str(operation.target)))
 
