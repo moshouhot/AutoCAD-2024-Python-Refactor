@@ -74,8 +74,11 @@ Core MVP 的 legacy 数据源：
 
 - `reg1.dli`：HKCU AutoCAD 用户树；
 - `reg2.dli`：HKLM AutoCAD 产品树及 Applications。
+- `reg3.dli`：仅从显式 `AUTOCAD_REG3_CORE_PREFIXES` allowlist 读取 AutoCAD 自身 Core 集成候选项，例如 `AutoCAD.Application` COM/TypeLib、DwgCommon、Drawing Check、Hardcopy、ObjectDBX。
 
 第一版允许相对宽松地保留 AutoCAD 自有树，以优先证明可运行。
+
+`reg3.dli` 的这部分不是“第三份 Core 模板整体导入”，而是一个严格前缀 allowlist。真实启动失败已经证明 `reg1 + reg2` 单独不足；其中 `AutoCAD.Application` bootstrap 有直接缺口证据，其余 reg3 Core 候选项仍需后续 live baseline 证明必要性。
 
 明确排除：
 

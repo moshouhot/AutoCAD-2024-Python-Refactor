@@ -73,7 +73,11 @@ Python 必须建立 AutoCAD 2024 正常启动所需的核心注册状态。
 
 原则：
 
+- `reg1.dli` 的 HKCU AutoCAD 用户/配置树是用户侧事实来源；
 - `reg2.dli` 的 AutoCAD 产品树和 Applications 是重要事实来源；
+- `reg3.dli` 只允许通过**显式 Core allowlist**读取少量 AutoCAD 自身集成注册，禁止整份导入；
+- 已有真实启动失败证据支持补入 `AutoCAD.Application` COM / TypeLib bootstrap；
+- `DwgCommon`、`Drawing Check`、`Hardcopy`、`ObjectDBX` 等当前属于候选 Core allowlist，是否每一组都是最小必需仍需在可信 live baseline 上验证；
 - 当前已验证 279 个 Application loader 与包内容一致（文件型 loader 0 缺失）；
 - 可以在 MVP 阶段把 legacy template 当**输入数据源**，但必须由 Python 解析、路径重写并受明确 root allowlist 约束；
 - 不允许无脑导入 `reg3.dli` 全系统快照；
@@ -81,6 +85,8 @@ Python 必须建立 AutoCAD 2024 正常启动所需的核心注册状态。
 - 不允许整体导入 `unreg.dli`。
 
 第一版允许保留较宽的 AutoCAD 自有 HKLM/HKCU 产品树，以换取 MVP 可用性；后续再做最小化。
+
+这里的“较宽”仍只限 AutoCAD 自身产品/COM 候选边界，不代表允许把 Windows Installer、EdgeUpdate、Forms、AcSign Shell 或其他系统级 reg3 状态一起带入 Core。
 
 ### FR-04 Path rebasing
 

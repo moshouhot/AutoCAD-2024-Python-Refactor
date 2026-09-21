@@ -75,7 +75,7 @@
 当前证据：
 
 - 31 passed；
-- real package plan 11,305 operations；
+- real package plan **11,554 operations**；
 - warnings 0；
 - audit findings 0；
 - FakeWindows repeat apply 幂等；

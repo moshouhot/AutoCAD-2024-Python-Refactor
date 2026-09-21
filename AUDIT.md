@@ -169,3 +169,15 @@ python -m pytest -q
 - System32 文件部署。
 
 补丁应用前：全量测试 31 passed；live diff 只计划创建 49 values / 66 keys，0 change，2 Junction 与 3 shortcut 均保持现状。
+
+后续候选实现又把 `reg3.dli` 中少量 AutoCAD 自身注册纳入显式 allowlist：
+
+- `HKCU\SOFTWARE\Autodesk\DwgCommon`
+- `HKLM\SOFTWARE\Autodesk\Drawing Check`
+- `HKLM\SOFTWARE\Autodesk\Hardcopy`
+- `HKLM\SOFTWARE\Autodesk\ObjectDBX`
+- `ObjectDBX.AxDbDocument.24` 及其 CLSID / TypeLib
+
+这些不等于整份 `reg3.dli` 重新进入 Core，也没有引入 EdgeUpdate、Forms、AcSign Shell、Windows Installer 或 System32 写入。
+
+证据强度需要区分：`AutoCAD.Application` COM bootstrap 有直接启动失败后的缺口证据；上述 DwgCommon/Hardcopy/ObjectDBX 等是**当前候选 Core allowlist**，尚未在新的可信 live baseline 上逐组证明“每一组都必需”。第三方审计不应把它们误写成已经完成最小化证明。

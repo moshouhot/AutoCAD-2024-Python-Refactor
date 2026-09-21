@@ -41,13 +41,13 @@
 | 检测 NET安装 | 1 | 检查 .NET 运行条件 |
 | 安装 VBA编程 | 1 | 安装/启用 AutoCAD VBA |
 | 桌面快捷方式 | 1 | 创建桌面快捷方式 |
-| 当前快捷方式 | 0 | 当前目录/当前上下文快捷方式，待确认 |
+| 当前快捷方式 | 0 | 在安装器当前目录创建 AutoCAD 快捷方式 |
 | 固定到任务栏 | 1 | 固定 AutoCAD 到任务栏 |
 | 恢复原始数据 | 0 | 执行恢复流程 |
 | 完全卸载程序 | 1 | 启用完整卸载行为 |
 | 安装自定义配置 | 1 | 合并用户自定义配置 |
 | 检测程序完整性 | 1 | 安装前/中进行文件完整性检查 |
-| 跳过网络验证 | 0 | 是否绕过网络检查，具体目的待确认 |
+| 跳过网络验证 | 0 | 当前 514 行主 CMD 未消费该配置；视为历史/外部扩展项 |
 
 > Phase 1 只记录实际含义，不等于 Python 必须保留同名开关。
 
@@ -129,22 +129,22 @@
 
 | ID | 功能域 | 当前理解 | Phase 1 状态 |
 |---|---|---|---|
-| F01 | 启动与权限 | UAC、管理员权限、系统环境发现 | 分析中 |
-| F02 | AutoCAD 路径/版本发现 | 从注册表和目录推导 AutoCAD 根路径、共享目录、用户目录 | 分析中 |
-| F03 | 安装主流程 | 安装前清理、目录准备、注册、依赖、快捷方式等 | 分析中 |
-| F04 | 注册表 | 导入 `reg*.dli`，重写与当前路径有关的值 | 分析中 |
-| F05 | CHS / 中文用户数据 | CHS 目录、Support、Template、Plotters、`Sample.cus` 等 | 已确认存在，待完整拆分 |
-| F06 | VBA | VBA 文件、AcadVBA 注册、Forms/FM20 等 | 已确认存在，待重新定义产品边界 |
-| F07 | WebView2 | `auedgewebview.dll` + `regedge.dli` | 待确认真实用途和是否属于 MVP |
-| F08 | Shell / AcSign / 系统辅助组件 | `Tohomedrive.dll` 等系统级载荷 | 待确认真实用户功能 |
-| F09 | Shortcut / Pin | 桌面快捷方式、其他快捷方式、任务栏固定 | 分析中 |
-| F10 | Junction / 路径适配 | 将用户目录/CHS 等映射到绿色包目录 | 分析中 |
-| F11 | 自定义配置 | `0自定义配置文件` 等配置合并 | 分析中 |
-| F12 | 完整性 / 网络前置检查 | .NET、文件列表、网络验证 | 分析中 |
-| F13 | 卸载 | 注册表、目录、快捷方式及共享组件清理 | 分析中 |
-| F14 | 备份 | 注册表/配置备份 | 分析中 |
-| F15 | Repair / Recovery | `default.dll` / `guanfang.dll` 恢复默认数据 | 分析中 |
-| F16 | 制作绿色包工具链 | REG→DLI、CHS/REG 打包、提取/复制等 | 待判断是否完全排除出 Python MVP |
+| F01 | 启动与权限 | UAC、管理员权限、系统环境发现 | 已解析 |
+| F02 | AutoCAD 路径/版本发现 | 从注册表和目录推导 AutoCAD 根路径、共享目录、用户目录 | 已解析 |
+| F03 | 安装主流程 | 安装前清理、目录准备、注册、依赖、快捷方式等 | 已解析 |
+| F04 | 注册表 | `reg1~4/regedge/vba/unreg` 已按职责拆分并建立风险边界 | 已解析 |
+| F05 | CHS / 中文用户数据 | CHS、Support、Template、Plotters、`Sample.cus` 与出厂基线 | 已解析 |
+| F06 | VBA | AcVBA、VBA Runtime、Forms/FM20、Installer 痕迹已分层 | 已解析；产品取舍见 Phase 2 |
+| F07 | WebView2 | 3 文件片段 + EdgeUpdate ClientState，不构成完整 Runtime | 已解析；MVP 后置 |
+| F08 | Shell / AcSign / 系统辅助组件 | Tohomedrive 已拆为 Plot/Style、AcSign、Forms 三类职责 | 已解析；MVP 后置/分拆 |
+| F09 | Shortcut / Pin | 桌面、当前目录、两个向导快捷方式、任务栏固定 | 已解析 |
+| F10 | Junction / 路径适配 | AppData/LocalAppData `chs` → 包内 CHS | 已解析 |
+| F11 | 自定义配置 | `0自定义配置文件` 可选合并；当前包不存在该目录 | 已解析 |
+| F12 | 完整性 / 前置检查 | .NET 4.7+；当前 `list.dll` 实际只检查 `acad.exe` | 已解析 |
+| F13 | 卸载 | 旧 CMD 的强杀、整树注册清理、用户目录清理等已拆分 | 已解析 |
+| F14 | 备份 | HKCU/HKLM AutoCAD 注册表快照型备份 | 已解析 |
+| F15 | Repair / Recovery | `default.dll` 注册模板 + `guanfang.dll` CHS 出厂恢复 | 已解析 |
+| F16 | 制作绿色包工具链 | REG→DLI、抓包、资源抽取、封包、BAT→EXE | 已解析；排除出 Python 安装器 MVP |
 
 ---
 
@@ -411,20 +411,27 @@ Phase 1 不在这里决定 Python 必须怎样实现，只负责把事实搞清�
 
 ---
 
-## 7. 下一批待分析
+## 7. Phase 1 收口状态
 
-按以下顺序继续：
+上述原始待分析项已经分别在第 4、8、9、10 节完成静态职责拆解：
 
-1. `:INSTALL` 完整控制流；
-2. 安装过程中实际导入的 `reg*.dli` 和路径重写；
-3. `guanfang.dll` / `default.dll` 与 CHS；
-4. `VBA.dll` / `vba.dli`；
-5. `Tohomedrive.dll`；
-6. `auedgewebview.dll` / `regedge.dli`；
-7. Shortcut / Junction / 自定义配置；
-8. `:UNINSTALL`；
-9. `:BACKUP` / `:RECOVERY`；
-10. 将制包工具链与运行时安装职责彻底分开。
+- `:INSTALL / :UNINSTALL / :BACKUP / :RECOVERY` 控制流已读完；
+- 7 个 `.dli` 已按产品职责分类；
+- `default.dll / guanfang.dll / Tohomedrive.dll / VBA.dll / auedgewebview.dll` 已只读列目录并建立职责映射；
+- Shortcut / Junction / 自定义配置 / .NET / 完整性检查已定位；
+- 制包工具链已经与运行时安装器明确分层。
+
+因此：
+
+> **Phase 1 在当前 Python MVP 所需的静态功能理解范围内可以视为完成。**
+
+这不代表所有功能都已被 Python 实现，也不代表真机行为已经通过。以下内容属于后续阶段而不是 Phase 1 未完成项：
+
+- 哪些旧职责进入 MVP / Later（Phase 2 产品取舍）；
+- Core 最小注册集合的真机充分性；
+- VBA / Forms 2.0 的真实运行闭环；
+- WebView2 / AcSign / System32 组件是否未来需要产品化；
+- 当前 D:/E:/F: 混合 live 环境的重新验收。
 
 ---
 

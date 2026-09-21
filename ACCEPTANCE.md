@@ -19,14 +19,16 @@
 
 ## C. P2 Registry plan
 
-- [x] 正确解析 `reg1.dli` / `reg2.dli`，包括 `REG_EXPAND_SZ`。
+- [x] 正确解析 `reg1.dli` / `reg2.dli` 以及 allowlist 内的 `reg3.dli` Core 候选项，包括 `REG_EXPAND_SZ`。
 - [x] 只允许预期 HKCU/HKLM AutoCAD roots。
 - [x] legacy AutoCAD package paths 能转换为当前 root。
 - [x] plan 中不存在旧 package root 残留（独立 plan audit = 0 findings）。
 - [x] Core plan 不包含 `reg3.dli` / `regedge.dli` / `vba.dli` / `unreg.dli` 全量导入。
+- [x] `reg3.dli` 只通过显式 Core prefix allowlist 进入 plan；不会把 Windows Installer / EdgeUpdate / Forms / AcSign Shell 整体带入。
 - [x] Core plan 不包含 System32/SysWOW64 写入。
 - [x] Core 排除了 HKCU 历史插件状态和 `AcadVBA`，避免尚未部署的 loader 悬空。
 - [x] Core 中计划写入的 AutoCAD Application loader 全部有实际目标或明确虚拟协议。
+- [ ] 在新的可信 live baseline 上验证 `DwgCommon / Drawing Check / Hardcopy / ObjectDBX` 候选组是否全部必需；当前不把它们宣称为“最小集合”。
 
 ## D. P3 Fake install
 
