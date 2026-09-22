@@ -20,6 +20,17 @@ from .planner import (
     HKCU_AUTOCAD,
     HKLM_AUTOCAD,
     InstallPlan,
+    VBA71_2052_FEATURE,
+    VBA71_2052_PACKED_PRODUCT,
+    VBA71_FEATURE,
+    VBA71_PACKED_PRODUCT,
+    VBA71_QUALIFIED_CATEGORY_PACKED,
+    VBA71_QUALIFIER_2052,
+    VBA_ENABLER_PACKED_PRODUCT,
+    VBA_MSI_ALLOWED_COMPONENT_CLIENTS,
+    VBA_MSI_CLIENT_VALUE_NAMES,
+    VBA_MSI_COMPONENT_CLIENT_ROOT,
+    VBA_MSI_REGISTRY_PREFIXES,
     VBA_RUNTIME_REGISTRY_PREFIXES,
     registry_key_is_same_or_descendant,
 )
@@ -48,8 +59,13 @@ def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFi
             if vba_enabled
             else ()
         ),
+        *(
+            (prefix.casefold() for prefix in VBA_MSI_REGISTRY_PREFIXES)
+            if vba_enabled
+            else ()
+        ),
     )
-    supported_registry_kinds = {"sz", "expand_sz", "dword"}
+    supported_registry_kinds = {"sz", "expand_sz", "dword", "multi_sz"}
 
     for warning in plan.warnings:
         findings.append(PlanFinding("PLAN_WARNING", warning))
@@ -78,6 +94,11 @@ def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFi
                     findings.append(PlanFinding("VBA_INSTALLER_METADATA", operation.key))
                 if "fm20" in lowered or "microsoft forms" in lowered or "\\forms." in lowered:
                     findings.append(PlanFinding("VBA_FORMS_IN_BASE", operation.key))
+            if vba_enabled and any(
+                registry_key_is_same_or_descendant(operation.key, prefix)
+                for prefix in VBA_MSI_REGISTRY_PREFIXES
+            ):
+                _check_vba_msi_identity(findings, operation)
 
         if isinstance(operation, SetRegistryValue):
             if operation.kind not in supported_registry_kinds:
@@ -138,6 +159,132 @@ def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFi
                 findings.append(PlanFinding("STATE_LOCATION", str(operation.path)))
 
     return tuple(findings)
+
+
+def _check_vba_msi_identity(
+    findings: list[PlanFinding],
+    operation: EnsureRegistryKey | SetRegistryValue,
+) -> None:
+    from .planner import HKLM_INSTALLER_CLASSES, HKLM_INSTALLER_USERDATA_SYSTEM
+
+    key = operation.key.rstrip("\\")
+    key_cf = key.casefold()
+
+    empty_keys = {
+        rf"{HKLM_INSTALLER_CLASSES}\Products\{VBA_ENABLER_PACKED_PRODUCT}".casefold(),
+        rf"{HKLM_INSTALLER_CLASSES}\Products\{VBA71_PACKED_PRODUCT}".casefold(),
+        rf"{HKLM_INSTALLER_CLASSES}\Products\{VBA71_2052_PACKED_PRODUCT}".casefold(),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_PACKED_PRODUCT}".casefold(),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_2052_PACKED_PRODUCT}".casefold(),
+    }
+    feature_keys = {
+        rf"{HKLM_INSTALLER_CLASSES}\Features\{VBA71_PACKED_PRODUCT}".casefold(): VBA71_FEATURE,
+        rf"{HKLM_INSTALLER_CLASSES}\Features\{VBA71_2052_PACKED_PRODUCT}".casefold(): VBA71_2052_FEATURE,
+    }
+    userdata_leaf_keys = {
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_PACKED_PRODUCT}\Features".casefold(): (
+            VBA71_FEATURE,
+            "sz",
+        ),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_PACKED_PRODUCT}\InstallProperties".casefold(): (
+            "WindowsInstaller",
+            "dword",
+        ),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_PACKED_PRODUCT}\Usage".casefold(): (
+            VBA71_FEATURE,
+            "dword",
+        ),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_2052_PACKED_PRODUCT}\Features".casefold(): (
+            VBA71_2052_FEATURE,
+            "sz",
+        ),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_2052_PACKED_PRODUCT}\InstallProperties".casefold(): (
+            "WindowsInstaller",
+            "dword",
+        ),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_2052_PACKED_PRODUCT}\Usage".casefold(): (
+            VBA71_2052_FEATURE,
+            "dword",
+        ),
+    }
+    qualified_key = (
+        rf"{HKLM_INSTALLER_CLASSES}\Components\{VBA71_QUALIFIED_CATEGORY_PACKED}"
+    ).casefold()
+
+    if key_cf in empty_keys:
+        if isinstance(operation, SetRegistryValue):
+            findings.append(PlanFinding("VBA_MSI_UNEXPECTED_VALUE", operation.key))
+        return
+
+    if key_cf in feature_keys:
+        if isinstance(operation, SetRegistryValue):
+            expected = feature_keys[key_cf]
+            if not (
+                operation.name == expected
+                and operation.kind == "sz"
+                and operation.data == ""
+            ):
+                findings.append(
+                    PlanFinding(
+                        "VBA_MSI_FEATURE_VALUE",
+                        f"{operation.key} [{operation.name}]",
+                    )
+                )
+        return
+
+    if key_cf in userdata_leaf_keys:
+        if isinstance(operation, SetRegistryValue):
+            expected_name, expected_kind = userdata_leaf_keys[key_cf]
+            if operation.name != expected_name or operation.kind != expected_kind:
+                findings.append(
+                    PlanFinding(
+                        "VBA_MSI_USERDATA_VALUE",
+                        f"{operation.key} [{operation.name}] type={operation.kind}",
+                    )
+                )
+            if operation.name == "WindowsInstaller" and operation.data != 1:
+                findings.append(
+                    PlanFinding("VBA_MSI_WINDOWS_INSTALLER", str(operation.data))
+                )
+        return
+
+    if key_cf == qualified_key:
+        if isinstance(operation, SetRegistryValue):
+            if not (
+                operation.name == VBA71_QUALIFIER_2052
+                and operation.kind == "multi_sz"
+                and isinstance(operation.data, list)
+                and len(operation.data) == 1
+            ):
+                findings.append(
+                    PlanFinding(
+                        "VBA_MSI_QUALIFIED_VALUE",
+                        f"{operation.key} [{operation.name}] type={operation.kind}",
+                    )
+                )
+        return
+
+    component_prefix = VBA_MSI_COMPONENT_CLIENT_ROOT.rstrip("\\") + "\\"
+    if key_cf.startswith(component_prefix.casefold()):
+        tail = key[len(component_prefix):]
+        if not re.fullmatch(r"[0-9A-Fa-f]{32}", tail):
+            findings.append(PlanFinding("VBA_MSI_COMPONENT_KEY", operation.key))
+            return
+        expected_product = VBA_MSI_ALLOWED_COMPONENT_CLIENTS.get(tail.upper())
+        if expected_product is None:
+            findings.append(PlanFinding("VBA_MSI_COMPONENT_SCOPE", operation.key))
+            return
+        if isinstance(operation, SetRegistryValue):
+            if operation.name != expected_product or operation.kind != "sz":
+                findings.append(
+                    PlanFinding(
+                        "VBA_MSI_COMPONENT_VALUE",
+                        f"{operation.key} [{operation.name}] type={operation.kind}",
+                    )
+                )
+        return
+
+    findings.append(PlanFinding("VBA_MSI_SCOPE", operation.key))
 
 
 def _check_no_system_target(findings: list[PlanFinding], path: Path, code: str) -> None:

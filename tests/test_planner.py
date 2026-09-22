@@ -7,10 +7,61 @@ import pytest
 from acad_portable.audit import validate_core_plan
 from acad_portable.model import PackageError, PackageLayout
 from acad_portable.ops import CreateShortcut, EnsureJunction, InstallArchiveFile, SetRegistryValue
-from acad_portable.planner import InstallPlanner, KnownFolders
+from acad_portable.planner import (
+    HKLM_INSTALLER_CLASSES,
+    HKLM_INSTALLER_USERDATA_SYSTEM,
+    InstallPlanner,
+    KnownFolders,
+    VBA71_2052_FEATURE,
+    VBA71_2052_PACKED_PRODUCT,
+    VBA71_2052_REQUIRED_COMPONENTS,
+    VBA71_FEATURE,
+    VBA71_FM20_PACKED_COMPONENT,
+    VBA71_PACKED_PRODUCT,
+    VBA71_QUALIFIED_CATEGORY_PACKED,
+    VBA71_QUALIFIER_2052,
+    VBA71_REQUIRED_COMPONENTS,
+    VBA_ENABLER_ACVBA_PACKED_COMPONENT,
+    VBA_ENABLER_PACKED_PRODUCT,
+    VBA_MSI_COMPONENT_CLIENT_ROOT,
+)
 
 
 REG_HEADER = "Windows Registry Editor Version 5.00\n\n"
+
+
+def _multi_sz_hex(*items: str) -> str:
+    raw = ("\x00".join(items) + "\x00\x00").encode("utf-16le")
+    return ",".join(f"{byte:02x}" for byte in raw)
+
+
+def append_vba_msi_fixture(layout: PackageLayout) -> None:
+    text = layout.vba_registry.read_text(encoding="utf-16")
+    component_rows: list[tuple[str, str, str]] = []
+    for packed_component in sorted(VBA71_REQUIRED_COMPONENTS):
+        if packed_component == VBA71_FM20_PACKED_COMPONENT:
+            data = r"C:\Windows\system32\FM20.DLL"
+        else:
+            data = rf"C:\Program Files\Common Files\Microsoft Shared\VBA\VBA7.1\{packed_component}.bin"
+        component_rows.append((packed_component, VBA71_PACKED_PRODUCT, data))
+    for packed_component in sorted(VBA71_2052_REQUIRED_COMPONENTS):
+        data = rf"C:\Program Files\Common Files\Microsoft Shared\VBA\VBA7.1\2052\{packed_component}.bin"
+        component_rows.append((packed_component, VBA71_2052_PACKED_PRODUCT, data))
+    parts = [
+        text,
+        f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products\\{VBA71_PACKED_PRODUCT}\\Features]\n"{VBA71_FEATURE}"="base-feature"\n''',
+        f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products\\{VBA71_PACKED_PRODUCT}\\Usage]\n"{VBA71_FEATURE}"=dword:00000001\n''',
+        f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products\\{VBA71_2052_PACKED_PRODUCT}\\Features]\n"{VBA71_2052_FEATURE}"="lang-feature"\n''',
+        f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products\\{VBA71_2052_PACKED_PRODUCT}\\Usage]\n"{VBA71_2052_FEATURE}"=dword:00000001\n''',
+    ]
+    for packed_component, packed_product, data in component_rows:
+        parts.append(
+            f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Components\\{packed_component}]\n"{packed_product}"="{data.replace(chr(92), chr(92) * 2)}"\n'''
+        )
+    parts.append(
+        f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\Installer\\Components\\{VBA71_QUALIFIED_CATEGORY_PACKED}]\n"{VBA71_QUALIFIER_2052}"=hex(7):{_multi_sz_hex("descriptor")}\n'''
+    )
+    layout.vba_registry.write_text("".join(parts), encoding="utf-16")
 
 
 def make_package(root: Path) -> PackageLayout:
@@ -310,7 +361,9 @@ def test_planner_deleted_sections_do_not_influence_path_rebasing(tmp_path: Path)
     )
 
 
-def test_vba_base_plan_includes_runtime_and_excludes_forms_and_installer(tmp_path: Path) -> None:
+def test_vba_base_plan_includes_minimal_msi_identity_and_excludes_untraced_installer_state(
+    tmp_path: Path,
+) -> None:
     layout = make_package(tmp_path)
     layout.config.write_text("桌面快捷方式=1\n安装 VBA编程=1\n", encoding="utf-8")
     layout.vba_archive.parent.mkdir(parents=True, exist_ok=True)
@@ -349,6 +402,7 @@ def test_vba_base_plan_includes_runtime_and_excludes_forms_and_installer(tmp_pat
 ''',
         encoding="utf-16",
     )
+    append_vba_msi_fixture(layout)
     folders = KnownFolders(
         user_profile=Path(r"C:\Users\Tester"),
         appdata=Path(r"C:\Users\Tester\AppData\Roaming"),
@@ -371,17 +425,102 @@ def test_vba_base_plan_includes_runtime_and_excludes_forms_and_installer(tmp_pat
     assert all("\\Windows\\System32" not in str(op.destination) for op in files)
     assert any("AcVBA2024.Bundle" in str(op.destination) for op in files)
     assert any("VBA7.1" in str(op.destination) for op in files)
+    assert all(
+        op.reuse_existing
+        for op in files
+        if "Common Files" in op.member
+    )
+    assert all(
+        not op.reuse_existing
+        for op in files
+        if "AcVBA2024.Bundle" in op.member
+    )
     assert any("\\Applications\\AcadVBA" in op.key for op in values)
     assert any("MSAPC.ApcGlobal" in op.key for op in values)
     assert any("SOFTWARE\\Microsoft\\VBA" in op.key for op in values)
-    assert all("\\Installer\\" not in op.key for op in values)
+    assert all("\\Installer\\Products\\FAKE" not in op.key for op in values)
+    assert all("\\SourceList" not in op.key for op in values)
+    assert all(op.name not in {"LocalPackage", "InstallSource", "PackageCode"} for op in values)
     assert all("0D452EE1-E08F-101A-852E-02608C4D0BB4" not in op.key for op in values)
+
+    component_values = [
+        op
+        for op in values
+        if op.key.casefold().startswith((VBA_MSI_COMPONENT_CLIENT_ROOT + "\\").casefold())
+    ]
+    assert all(op.preserve_existing for op in component_values)
+    assert {
+        (op.key.rsplit("\\", 1)[-1], op.name)
+        for op in component_values
+    } == (
+        {(VBA_ENABLER_ACVBA_PACKED_COMPONENT, VBA_ENABLER_PACKED_PRODUCT)}
+        | {(component, VBA71_PACKED_PRODUCT) for component in VBA71_REQUIRED_COMPONENTS}
+        | {
+            (component, VBA71_2052_PACKED_PRODUCT)
+            for component in VBA71_2052_REQUIRED_COMPONENTS
+        }
+    )
+    assert len(component_values) == (
+        1 + len(VBA71_REQUIRED_COMPONENTS) + len(VBA71_2052_REQUIRED_COMPONENTS)
+    )
+    # Exhaustive Feature-state A/B proved these two 2052 help components are
+    # not needed to make VBAIntl LOCAL or to satisfy qualified-component
+    # resolution.  Keep them out of the portable runtime identity.
+    assert all(
+        op.key.rsplit("\\", 1)[-1]
+        not in {
+            "510B39BF82203DD46BD61B5EDBCCC141",  # VBCN6.CHM
+            "81C4E51E4B74CD4498C9EB0AC0DDC578",  # FM20.CHM
+        }
+        for op in component_values
+    )
+    assert any(
+        op.key.endswith("\\" + VBA71_FM20_PACKED_COMPONENT)
+        and str(op.data).lower().endswith(r"\windows\system32\fm20.dll")
+        for op in component_values
+    )
+
+    assert any(
+        op.key.casefold()
+        == rf"{HKLM_INSTALLER_CLASSES}\Features\{VBA71_PACKED_PRODUCT}".casefold()
+        and op.name == VBA71_FEATURE
+        and op.data == ""
+        for op in values
+    )
+    assert any(
+        op.key.casefold()
+        == rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_PACKED_PRODUCT}\InstallProperties".casefold()
+        and op.name == "WindowsInstaller"
+        and op.data == 1
+        for op in values
+    )
+    qualified = next(
+        op
+        for op in values
+        if op.key.casefold()
+        == rf"{HKLM_INSTALLER_CLASSES}\Components\{VBA71_QUALIFIED_CATEGORY_PACKED}".casefold()
+        and op.name == VBA71_QUALIFIER_2052
+    )
+    assert qualified.kind == "multi_sz"
+    assert qualified.data == ["descriptor"]
+    assert qualified.preserve_existing is True
     vbe_path = next(
-        str(op.data)
+        op
         for op in values
         if op.key.endswith(r"SOFTWARE\Microsoft\VBA") and op.name == "Vbe71DllPath"
     )
-    assert vbe_path.startswith(r"C:\Program Files\Common Files\Microsoft Shared\VBA")
-    assert "PROGRA~1" not in vbe_path.upper()
+    assert str(vbe_path.data).startswith(
+        r"C:\Program Files\Common Files\Microsoft Shared\VBA"
+    )
+    assert "PROGRA~1" not in str(vbe_path.data).upper()
+    assert vbe_path.preserve_existing is True
+    msi_values = [
+        op
+        for op in values
+        if "\\Installer\\" in op.key
+        or "\\CurrentVersion\\Installer\\UserData\\" in op.key
+    ]
+    assert msi_values
+    assert all(op.preserve_existing for op in msi_values)
     assert validate_core_plan(plan, layout) == ()
 

@@ -14,6 +14,7 @@ def test_registry_parser_handles_strings_dword_delete_and_hex() -> None:
 "Blob"=hex:01,02,03,\\
   04,05
 "Expand"=hex(2):25,00,55,00,53,00,45,00,52,00,50,00,52,00,4f,00,46,00,49,00,4c,00,45,00,25,00,5c,00,54,00,65,00,73,00,74,00,00,00
+"Multi"=hex(7):6f,00,6e,00,65,00,00,00,74,00,77,00,6f,00,00,00,00,00
 "Gone"=-
 '''
     )
@@ -27,6 +28,8 @@ def test_registry_parser_handles_strings_dword_delete_and_hex() -> None:
     assert "04,05" in str(by_name["Blob"].data)
     assert by_name["Expand"].kind == "expand_sz"
     assert by_name["Expand"].data == r"%USERPROFILE%\Test"
+    assert by_name["Multi"].kind == "multi_sz"
+    assert by_name["Multi"].data == ["one", "two"]
     assert by_name["Gone"].kind == "delete"
 
 

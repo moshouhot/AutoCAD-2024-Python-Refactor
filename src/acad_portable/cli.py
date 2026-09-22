@@ -184,6 +184,7 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
         "registry": {
             "same": report.registry_same,
             "change": report.registry_change,
+            "external_preserved": report.registry_external_preserved,
             "create": report.registry_create,
             "keys_create": report.registry_keys_create,
         },
@@ -198,6 +199,7 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
         },
         "files": {
             "same": report.file_same,
+            "reuse": report.file_reuse,
             "create": report.file_create,
             "conflict": report.file_conflict,
         },
@@ -209,6 +211,7 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
         print(
             "Registry     : "
             f"same={report.registry_same} change={report.registry_change} "
+            f"external_preserved={report.registry_external_preserved} "
             f"create={report.registry_create} keys_create={report.registry_keys_create}"
         )
         print(
@@ -218,7 +221,8 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
         print(f"Shortcuts    : existing={report.shortcut_existing} create={report.shortcut_create}")
         print(
             "Files        : "
-            f"same={report.file_same} create={report.file_create} conflict={report.file_conflict}"
+            f"same={report.file_same} reuse={report.file_reuse} "
+            f"create={report.file_create} conflict={report.file_conflict}"
         )
         for detail in report.details[:20]:
             print(f"  - {detail}")

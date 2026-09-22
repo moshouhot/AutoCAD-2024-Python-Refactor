@@ -8,6 +8,7 @@ from acad_portable.real_windows import (
     _encode_json_value,
     _new_state,
     _ps_quote,
+    _registry_kind,
     _registry_operation_matches_snapshot,
     inspect_install_state,
 )
@@ -17,6 +18,10 @@ def test_json_registry_value_roundtrip() -> None:
     values = [b"\x00\xff", ["a", "b"], (1, "x"), "plain", 123]
     for value in values:
         assert _decode_json_value(_encode_json_value(value)) == value
+
+
+def test_registry_kind_supports_multi_sz() -> None:
+    assert _registry_kind("multi_sz") == 7
 
 
 def test_powershell_quote_handles_apostrophe_and_unicode() -> None:

@@ -47,6 +47,7 @@ class UninstallReport:
 class LiveDiffReport:
     registry_same: int
     registry_change: int
+    registry_external_preserved: int
     registry_create: int
     registry_keys_create: int
     junction_same: int
@@ -55,6 +56,7 @@ class LiveDiffReport:
     shortcut_existing: int
     shortcut_create: int
     file_same: int
+    file_reuse: int
     file_create: int
     file_conflict: int
     details: tuple[str, ...]
@@ -71,6 +73,7 @@ def inspect_live_diff(
 
     registry_same = 0
     registry_change = 0
+    registry_external_preserved = 0
     registry_create = 0
     registry_keys_create = 0
     junction_same = 0
@@ -79,9 +82,14 @@ def inspect_live_diff(
     shortcut_existing = 0
     shortcut_create = 0
     file_same = 0
+    file_reuse = 0
     file_create = 0
     file_conflict = 0
     details: list[str] = []
+
+    state_op = next((op for op in plan.operations if isinstance(op, WriteInstallState)), None)
+    prior_state = _load_state(state_op.path) if state_op is not None else None
+    prior_values = (prior_state or {}).get("registry_values", {})
 
     for operation in plan.operations:
         if isinstance(operation, EnsureRegistryKey):
@@ -91,14 +99,35 @@ def inspect_live_diff(
 
         if isinstance(operation, SetRegistryValue):
             current = _query_registry_value(operation.key, operation.name)
+            identity = f"{operation.key}\u0000{operation.name}"
+            prior_entry = prior_values.get(identity)
             wanted = {
                 "type": _registry_kind(operation.kind),
                 "data": _encode_json_value(operation.data),
             }
             if current is None:
-                registry_create += 1
+                if prior_entry is not None and (
+                    prior_entry.get("released")
+                    or not _registry_snapshot_equal(current, prior_entry.get("installed"))
+                ):
+                    registry_external_preserved += 1
+                    if len(details) < 100:
+                        details.append(f"REG_EXTERNAL_PRESERVED {operation.key} [{operation.name}]")
+                else:
+                    registry_create += 1
             elif _registry_operation_matches_snapshot(operation, current):
                 registry_same += 1
+            elif prior_entry is not None and (
+                prior_entry.get("released")
+                or not _registry_snapshot_equal(current, prior_entry.get("installed"))
+            ):
+                registry_external_preserved += 1
+                if len(details) < 100:
+                    details.append(f"REG_EXTERNAL_PRESERVED {operation.key} [{operation.name}]")
+            elif operation.preserve_existing:
+                registry_external_preserved += 1
+                if len(details) < 100:
+                    details.append(f"REG_EXTERNAL_PRESERVED {operation.key} [{operation.name}]")
             else:
                 registry_change += 1
                 if len(details) < 100:
@@ -130,6 +159,10 @@ def inspect_live_diff(
                 file_create += 1
             elif operation.destination.is_file() and _file_sha256(operation.destination) == wanted_sha:
                 file_same += 1
+            elif operation.destination.is_file() and operation.reuse_existing:
+                file_reuse += 1
+                if len(details) < 100:
+                    details.append(f"FILE_REUSE_EXISTING {operation.destination}")
             else:
                 file_conflict += 1
                 if len(details) < 100:
@@ -138,6 +171,7 @@ def inspect_live_diff(
     return LiveDiffReport(
         registry_same=registry_same,
         registry_change=registry_change,
+        registry_external_preserved=registry_external_preserved,
         registry_create=registry_create,
         registry_keys_create=registry_keys_create,
         junction_same=junction_same,
@@ -146,6 +180,7 @@ def inspect_live_diff(
         shortcut_existing=shortcut_existing,
         shortcut_create=shortcut_create,
         file_same=file_same,
+        file_reuse=file_reuse,
         file_create=file_create,
         file_conflict=file_conflict,
         details=tuple(details),
@@ -175,6 +210,7 @@ class RealWindowsAdapter:
                     continue
                 self._apply(operation, state)
                 applied += 1
+            self._reconcile_retired_registry_ownership(plan, state)
             state["status"] = "complete"
             _write_state(state_path, state)
         except Exception:
@@ -183,6 +219,71 @@ class RealWindowsAdapter:
             _write_state(state_path, state)
             raise
         return ApplyReport(operations=applied, state_path=state_path)
+
+    def _reconcile_retired_registry_ownership(
+        self,
+        plan: InstallPlan,
+        state: dict[str, Any],
+    ) -> None:
+        """Release registry ownership that disappeared from an upgraded plan.
+
+        Only values recorded in our journal are eligible.  If the current
+        value still equals the snapshot installed by the previous plan, the
+        original value is restored (or the value is deleted when it did not
+        exist before).  If anything else has changed it, ownership is simply
+        released and the external value is preserved.
+        """
+        planned_value_ids = {
+            f"{operation.key}\u0000{operation.name}"
+            for operation in plan.operations
+            if isinstance(operation, SetRegistryValue)
+        }
+        planned_keys = {
+            operation.key
+            for operation in plan.operations
+            if isinstance(operation, (EnsureRegistryKey, SetRegistryValue))
+        }
+
+        values = state.setdefault("registry_values", {})
+        retired = state.setdefault("retired_registry_values", {})
+        for identity, entry in list(values.items()):
+            if identity in planned_value_ids:
+                continue
+            key, name = identity.split("\u0000", 1)
+            current = _query_registry_value(key, name)
+            installed = entry.get("installed")
+
+            if entry.get("released") or not _registry_snapshot_equal(current, installed):
+                retired[identity] = {
+                    "action": "released_external",
+                    "snapshot": current,
+                }
+                del values[identity]
+                continue
+
+            before = entry.get("before")
+            if before is None:
+                _delete_registry_value(key, name)
+                action = "removed"
+            else:
+                _set_registry_snapshot(key, name, before)
+                action = "restored"
+            retired[identity] = {
+                "action": action,
+                "before": before,
+                "installed": installed,
+            }
+            del values[identity]
+
+        created_keys = state.setdefault("created_registry_keys", [])
+        for key in sorted(
+            [item for item in created_keys if item not in planned_keys],
+            key=lambda item: item.count("\\"),
+            reverse=True,
+        ):
+            _delete_registry_key_if_empty(key)
+            if not _registry_key_exists(key):
+                created_keys.remove(key)
 
     def uninstall(self, state_path: Path) -> UninstallReport:
         state = _load_state(state_path)
@@ -210,6 +311,8 @@ class RealWindowsAdapter:
             files_removed += 1
 
         for identity, entry in reversed(list(state.get("registry_values", {}).items())):
+            if entry.get("released"):
+                continue
             key, name = identity.split("\u0000", 1)
             current = _query_registry_value(key, name)
             installed = entry.get("installed")
@@ -292,10 +395,23 @@ class RealWindowsAdapter:
             current = _query_registry_value(operation.key, operation.name)
             if current is not None and _registry_operation_matches_snapshot(operation, current):
                 return
-            if identity not in values:
-                values[identity] = {"before": current}
+            entry = values.get(identity)
+            if entry is not None:
+                if entry.get("released"):
+                    entry["released_snapshot"] = current
+                    return
+                if not _registry_snapshot_equal(current, entry.get("installed")):
+                    entry["released"] = True
+                    entry["released_snapshot"] = current
+                    return
+            else:
+                if operation.preserve_existing and current is not None:
+                    return
+                entry = {"before": current}
+                values[identity] = entry
+                state.setdefault("retired_registry_values", {}).pop(identity, None)
             _set_registry_value(operation)
-            values[identity]["installed"] = _query_registry_value(operation.key, operation.name)
+            entry["installed"] = _query_registry_value(operation.key, operation.name)
             return
 
         if isinstance(operation, EnsureDirectory):
@@ -333,6 +449,8 @@ class RealWindowsAdapter:
             if operation.destination.is_file():
                 current_sha = _file_sha256(operation.destination)
                 if current_sha == wanted_sha:
+                    return
+                if operation.reuse_existing:
                     return
                 raise RuntimeError(
                     "refusing to overwrite existing shared file with different content: "
@@ -464,6 +582,7 @@ def _registry_kind(kind: str) -> int:
         "sz": 1,  # REG_SZ
         "expand_sz": 2,  # REG_EXPAND_SZ
         "dword": 4,  # REG_DWORD
+        "multi_sz": 7,  # REG_MULTI_SZ
     }
     try:
         return mapping[kind]

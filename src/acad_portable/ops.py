@@ -15,6 +15,7 @@ class SetRegistryValue:
     name: str
     kind: str
     data: object
+    preserve_existing: bool = False
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ class InstallArchiveFile:
     member: str
     destination: Path
     password: str | None = None
+    reuse_existing: bool = False
 
 
 @dataclass(frozen=True)

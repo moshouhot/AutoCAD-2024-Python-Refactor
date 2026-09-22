@@ -25,7 +25,7 @@ def patch_registry_backend(monkeypatch, memory: RegistryMemory) -> None:
 
     def set_value(operation: SetRegistryValue) -> None:
         memory.keys.add(operation.key)
-        kind = {"sz": 1, "expand_sz": 2, "dword": 4}[operation.kind]
+        kind = {"sz": 1, "expand_sz": 2, "dword": 4, "multi_sz": 7}[operation.kind]
         memory.values[(operation.key, operation.name)] = {
             "type": kind,
             "data": deepcopy(operation.data),
@@ -73,6 +73,254 @@ def test_journal_preserves_original_state_across_repeat_install(tmp_path: Path, 
     assert first_state["registry_values"][identity]["before"]["data"] == r"D:\Original"
     assert second_state["registry_values"][identity]["before"]["data"] == r"D:\Original"
     assert memory.values[(key, "AcadLocation")]["data"] == r"F:\Portable"
+
+
+def test_first_install_preserves_preexisting_shared_registry_value(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\SharedRuntime"
+    memory.keys.add(key)
+    memory.values[(key, "Setting")] = {"type": 1, "data": "external"}
+    state_path = tmp_path / "state.json"
+    plan = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(
+                key,
+                "Setting",
+                "sz",
+                "portable",
+                preserve_existing=True,
+            ),
+            WriteInstallState(state_path, {}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(plan)
+
+    identity = f"{key}\u0000Setting"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert identity not in state["registry_values"]
+    assert memory.values[(key, "Setting")]["data"] == "external"
+
+    report = adapter.uninstall(state_path)
+    assert report.conflicts == ()
+    assert memory.values[(key, "Setting")]["data"] == "external"
+
+
+def test_first_install_owns_missing_preserve_existing_registry_value(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\SharedRuntime"
+    memory.keys.add(key)
+    state_path = tmp_path / "state.json"
+    plan = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(
+                key,
+                "Setting",
+                "sz",
+                "portable",
+                preserve_existing=True,
+            ),
+            WriteInstallState(state_path, {}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(plan)
+
+    identity = f"{key}\u0000Setting"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["registry_values"][identity]["before"] is None
+    assert state["registry_values"][identity]["installed"]["data"] == "portable"
+    assert memory.values[(key, "Setting")]["data"] == "portable"
+
+    report = adapter.uninstall(state_path)
+    assert report.conflicts == ()
+    assert (key, "Setting") not in memory.values
+
+
+def test_upgrade_releases_registry_value_changed_externally(tmp_path: Path, monkeypatch) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD\R24.3\Runtime"
+    memory.keys.add(key)
+    memory.values[(key, "Setting")] = {"type": 1, "data": "before"}
+    state_path = tmp_path / "state.json"
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    first = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Setting", "sz", "installed-v1"),
+            WriteInstallState(state_path, {"version": 1}),
+        ),
+        warnings=(), metadata={},
+    )
+    second = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Setting", "sz", "installed-v2"),
+            WriteInstallState(state_path, {"version": 2}),
+        ),
+        warnings=(), metadata={},
+    )
+
+    adapter.apply_plan(first)
+    memory.values[(key, "Setting")] = {"type": 1, "data": "external"}
+    adapter.apply_plan(second)
+    adapter.apply_plan(second)
+
+    identity = f"{key}\u0000Setting"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["registry_values"][identity]["released"] is True
+    assert memory.values[(key, "Setting")]["data"] == "external"
+
+    report = adapter.uninstall(state_path)
+    assert report.conflicts == ()
+    assert memory.values[(key, "Setting")]["data"] == "external"
+    assert not state_path.exists()
+
+
+def test_upgrade_updates_registry_value_when_still_installer_owned(tmp_path: Path, monkeypatch) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Owned"
+    memory.keys.add(key)
+    memory.values[(key, "Setting")] = {"type": 1, "data": "before"}
+    state_path = tmp_path / "state.json"
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+
+    adapter.apply_plan(InstallPlan(
+        operations=(EnsureRegistryKey(key), SetRegistryValue(key, "Setting", "sz", "v1"), WriteInstallState(state_path, {})),
+        warnings=(), metadata={},
+    ))
+    adapter.apply_plan(InstallPlan(
+        operations=(EnsureRegistryKey(key), SetRegistryValue(key, "Setting", "sz", "v2"), WriteInstallState(state_path, {})),
+        warnings=(), metadata={},
+    ))
+
+    identity = f"{key}\u0000Setting"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["registry_values"][identity]["before"]["data"] == "before"
+    assert state["registry_values"][identity]["installed"]["data"] == "v2"
+    assert not state["registry_values"][identity].get("released", False)
+    assert memory.values[(key, "Setting")]["data"] == "v2"
+
+
+def test_upgrade_removes_stale_owned_registry_value_dropped_from_new_plan(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Owned"
+    state_path = tmp_path / "state.json"
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    first = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Keep", "sz", "keep"),
+            SetRegistryValue(key, "Drop", "sz", "drop"),
+            WriteInstallState(state_path, {"version": 1}),
+        ),
+        warnings=(), metadata={},
+    )
+    second = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Keep", "sz", "keep"),
+            WriteInstallState(state_path, {"version": 2}),
+        ),
+        warnings=(), metadata={},
+    )
+
+    adapter.apply_plan(first)
+    adapter.apply_plan(second)
+
+    stale_identity = f"{key}\u0000Drop"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert (key, "Drop") not in memory.values
+    assert stale_identity not in state["registry_values"]
+    assert state["retired_registry_values"][stale_identity]["action"] == "removed"
+    assert memory.values[(key, "Keep")]["data"] == "keep"
+
+
+def test_upgrade_restores_stale_owned_registry_value_to_original(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Owned"
+    memory.keys.add(key)
+    memory.values[(key, "Setting")] = {"type": 1, "data": "original"}
+    state_path = tmp_path / "state.json"
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+
+    adapter.apply_plan(InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Setting", "sz", "installed"),
+            WriteInstallState(state_path, {"version": 1}),
+        ),
+        warnings=(), metadata={},
+    ))
+    adapter.apply_plan(InstallPlan(
+        operations=(EnsureRegistryKey(key), WriteInstallState(state_path, {"version": 2})),
+        warnings=(), metadata={},
+    ))
+
+    identity = f"{key}\u0000Setting"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert memory.values[(key, "Setting")]["data"] == "original"
+    assert identity not in state["registry_values"]
+    assert state["retired_registry_values"][identity]["action"] == "restored"
+
+
+def test_upgrade_preserves_external_change_when_stale_value_is_dropped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Owned"
+    state_path = tmp_path / "state.json"
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+
+    adapter.apply_plan(InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Setting", "sz", "installed"),
+            WriteInstallState(state_path, {"version": 1}),
+        ),
+        warnings=(), metadata={},
+    ))
+    memory.values[(key, "Setting")] = {"type": 1, "data": "external"}
+    adapter.apply_plan(InstallPlan(
+        operations=(EnsureRegistryKey(key), WriteInstallState(state_path, {"version": 2})),
+        warnings=(), metadata={},
+    ))
+
+    identity = f"{key}\u0000Setting"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert memory.values[(key, "Setting")]["data"] == "external"
+    assert identity not in state["registry_values"]
+    assert state["retired_registry_values"][identity]["action"] == "released_external"
 
 
 def test_uninstall_restores_original_registry_value(tmp_path: Path, monkeypatch) -> None:
@@ -175,12 +423,20 @@ def test_live_diff_classifies_registry_without_writing(tmp_path: Path, monkeypat
     memory.keys.add(key)
     memory.values[(key, "Same")] = {"type": 1, "data": "same"}
     memory.values[(key, "Change")] = {"type": 1, "data": "old"}
+    memory.values[(key, "Preserve")] = {"type": 1, "data": "external"}
 
     plan = InstallPlan(
         operations=(
             EnsureRegistryKey(key),
             SetRegistryValue(key, "Same", "sz", "same"),
             SetRegistryValue(key, "Change", "sz", "new"),
+            SetRegistryValue(
+                key,
+                "Preserve",
+                "sz",
+                "portable",
+                preserve_existing=True,
+            ),
             SetRegistryValue(key, "Create", "dword", 1),
             WriteInstallState(tmp_path / "state.json", {"test": True}),
         ),
@@ -191,8 +447,10 @@ def test_live_diff_classifies_registry_without_writing(tmp_path: Path, monkeypat
     report = rw.inspect_live_diff(plan, allow_non_windows_for_tests=True)
     assert report.registry_same == 1
     assert report.registry_change == 1
+    assert report.registry_external_preserved == 1
     assert report.registry_create == 1
     assert memory.values[(key, "Change")]["data"] == "old"
+    assert memory.values[(key, "Preserve")]["data"] == "external"
     assert not (tmp_path / "state.json").exists()
 
 
@@ -305,6 +563,41 @@ def test_archive_file_install_refuses_different_preexisting_shared_file(
     assert destination.read_bytes() == b"external-version"
 
 
+def test_archive_file_install_reuses_different_preexisting_shared_file_when_allowed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive-placeholder")
+    destination = tmp_path / "runtime.dll"
+    destination.write_bytes(b"external-version")
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda operation: b"runtime-v1")
+    plan = InstallPlan(
+        operations=(
+            rw.InstallArchiveFile(
+                archive, "runtime.dll", destination, "zzz", reuse_existing=True
+            ),
+            WriteInstallState(state_path, {"test": True}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(plan)
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["created_files"] == {}
+    assert destination.read_bytes() == b"external-version"
+
+    report = adapter.uninstall(state_path)
+    assert report.conflicts == ()
+    assert report.files_removed == 0
+    assert destination.read_bytes() == b"external-version"
+
+
 def test_live_diff_classifies_archive_files_without_writing(tmp_path: Path, monkeypatch) -> None:
     memory = RegistryMemory()
     patch_registry_backend(monkeypatch, memory)
@@ -313,6 +606,8 @@ def test_live_diff_classifies_archive_files_without_writing(tmp_path: Path, monk
     same = tmp_path / "same.dll"
     same.write_bytes(b"runtime-v1")
     create = tmp_path / "create.dll"
+    reuse = tmp_path / "reuse.dll"
+    reuse.write_bytes(b"external-version")
     conflict = tmp_path / "conflict.dll"
     conflict.write_bytes(b"external-version")
     monkeypatch.setattr(rw, "_read_archive_member", lambda operation: b"runtime-v1")
@@ -320,6 +615,9 @@ def test_live_diff_classifies_archive_files_without_writing(tmp_path: Path, monk
         operations=(
             rw.InstallArchiveFile(archive, "same.dll", same, "zzz"),
             rw.InstallArchiveFile(archive, "create.dll", create, "zzz"),
+            rw.InstallArchiveFile(
+                archive, "reuse.dll", reuse, "zzz", reuse_existing=True
+            ),
             rw.InstallArchiveFile(archive, "conflict.dll", conflict, "zzz"),
             WriteInstallState(tmp_path / "state.json", {"test": True}),
         ),
@@ -330,6 +628,7 @@ def test_live_diff_classifies_archive_files_without_writing(tmp_path: Path, monk
     report = rw.inspect_live_diff(plan, allow_non_windows_for_tests=True)
 
     assert report.file_same == 1
+    assert report.file_reuse == 1
     assert report.file_create == 1
     assert report.file_conflict == 1
     assert any(str(conflict) in detail for detail in report.details)
