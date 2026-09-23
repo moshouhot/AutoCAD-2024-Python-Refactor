@@ -17,7 +17,7 @@
 
 ## 当前阶段
 
-当前处于 **Phase 1：完整理解 CMD**。
+**MVP-A Core 已完成真机验收；MVP-B 基础 VBA（`VBALOAD + VBAIDE + AutoCAD-native 普通宏`）已最终验收 PASS；Forms2/UserForm 作为后续独立阶段推进。** 以下 Phase 1 文档保留为历史设计依据，当前进展以 [`HANDOFF.md`](HANDOFF.md) 为准。V4 → V6 CMD 优化资料见 [`安装脚本资料/README.md`](安装脚本资料/README.md)。
 
 本阶段主要产物：
 
@@ -69,4 +69,3 @@ Phase 1 原则上不急着写 Python，先把旧安装器真正做了什么搞�
 ## 免责声明
 
 本项目不是 Autodesk 官方项目，也不隶属于 Autodesk。
-
