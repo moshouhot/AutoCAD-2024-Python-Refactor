@@ -4,7 +4,16 @@ import hashlib
 import os
 from pathlib import Path
 
+import pytest
+
 import acad_portable.real_windows as rw
+from acad_portable.ops import (
+    EnsureRegistryKey,
+    InstallArchiveFile,
+    SetRegistryValue,
+    WriteInstallState,
+)
+from acad_portable.planner import InstallPlan
 
 from test_real_windows_journal import RegistryMemory, patch_registry_backend
 from test_real_windows_remediation import (
@@ -146,3 +155,226 @@ def test_atomic_write_rechecks_reparse_before_replace(
 
     assert not destination.exists()
     assert not list(parent.glob("*.tmp"))
+
+
+def test_archive_preflight_failure_happens_before_registry_and_state_mutation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_CURRENT_USER\SOFTWARE\PreflightOrder"
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    state_path = tmp_path / "state.json"
+
+    def fail_read(_operation):
+        raise RuntimeError("bad password")
+
+    monkeypatch.setattr(rw, "_read_archive_member", fail_read)
+    plan = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Setting", "sz", "v1"),
+            InstallArchiveFile(
+                archive,
+                "Program Files/runtime.dll",
+                destination,
+                "bad-password",
+            ),
+            WriteInstallState(state_path, {"version": 1}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    with pytest.raises(RuntimeError, match="bad password"):
+        rw.RealWindowsAdapter(allow_non_windows_for_tests=True).apply_plan(plan)
+
+    assert key not in memory.keys
+    assert (key, "Setting") not in memory.values
+    assert not destination.exists()
+    assert not state_path.exists()
+
+
+def test_archive_preflight_failure_does_not_rewrite_existing_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    state_path = tmp_path / "state.json"
+    existing_state = rw._new_state()
+    existing_state["status"] = "complete"
+    existing_state["install_payload"] = {"version": "existing"}
+    rw._write_state(state_path, existing_state)
+    before = state_path.read_bytes()
+
+    def fail_read(_operation):
+        raise RuntimeError("corrupt archive")
+
+    monkeypatch.setattr(rw, "_read_archive_member", fail_read)
+    plan = InstallPlan(
+        operations=(
+            InstallArchiveFile(
+                archive,
+                "Program Files/runtime.dll",
+                destination,
+                "password",
+            ),
+            WriteInstallState(state_path, {"version": "new"}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    with pytest.raises(RuntimeError, match="corrupt archive"):
+        rw.RealWindowsAdapter(allow_non_windows_for_tests=True).apply_plan(plan)
+
+    assert state_path.read_bytes() == before
+    assert not destination.exists()
+
+
+def test_all_archive_members_preflight_before_first_destination_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    first_destination = tmp_path / "Apps64" / "first.dll"
+    second_destination = tmp_path / "Apps64" / "second.dll"
+    state_path = tmp_path / "state.json"
+    reads: list[str] = []
+
+    def read_member(operation: InstallArchiveFile) -> bytes:
+        reads.append(operation.member)
+        if operation.member.endswith("second.dll"):
+            raise RuntimeError("second member missing")
+        return b"first-payload"
+
+    monkeypatch.setattr(rw, "_read_archive_member", read_member)
+    plan = InstallPlan(
+        operations=(
+            InstallArchiveFile(
+                archive,
+                "Program Files/first.dll",
+                first_destination,
+                "password",
+            ),
+            InstallArchiveFile(
+                archive,
+                "Program Files/second.dll",
+                second_destination,
+                "password",
+            ),
+            WriteInstallState(state_path, {}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    with pytest.raises(RuntimeError, match="second member missing"):
+        rw.RealWindowsAdapter(allow_non_windows_for_tests=True).apply_plan(plan)
+
+    assert reads == ["Program Files/first.dll", "Program Files/second.dll"]
+    assert not first_destination.exists()
+    assert not second_destination.exists()
+    assert not state_path.exists()
+
+
+def test_archive_preflight_cache_reads_each_operation_once_and_refreshes_next_apply(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_CURRENT_USER\SOFTWARE\PreflightSuccess"
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    first_destination = tmp_path / "Apps64" / "first.dll"
+    second_destination = tmp_path / "Apps64" / "second.dll"
+    state_path = tmp_path / "state.json"
+    payloads = {
+        "Program Files/first.dll": b"first-v1",
+        "Program Files/second.dll": b"second-v1",
+    }
+    events: list[str] = []
+    reads: list[str] = []
+
+    def read_member(operation: InstallArchiveFile) -> bytes:
+        reads.append(operation.member)
+        events.append(f"read:{operation.member}")
+        return payloads[operation.member]
+
+    real_write_state = rw._write_state
+
+    def spy_write_state(path: Path, state) -> None:
+        events.append("state-write")
+        real_write_state(path, state)
+
+    real_set_value = rw._set_registry_value
+
+    def spy_set_value(operation: SetRegistryValue) -> None:
+        events.append("registry-write")
+        real_set_value(operation)
+
+    monkeypatch.setattr(rw, "_read_archive_member", read_member)
+    monkeypatch.setattr(rw, "_write_state", spy_write_state)
+    monkeypatch.setattr(rw, "_set_registry_value", spy_set_value)
+
+    plan = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Setting", "sz", "portable"),
+            InstallArchiveFile(
+                archive,
+                "Program Files/first.dll",
+                first_destination,
+                "password",
+            ),
+            InstallArchiveFile(
+                archive,
+                "Program Files/second.dll",
+                second_destination,
+                "password",
+            ),
+            WriteInstallState(state_path, {"version": 1}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+
+    adapter.apply_plan(plan)
+
+    expected_reads = ["Program Files/first.dll", "Program Files/second.dll"]
+    assert reads == expected_reads
+    assert events[:2] == [f"read:{member}" for member in expected_reads]
+    assert events.index("state-write") >= 2
+    assert events.index("registry-write") >= 2
+    assert first_destination.read_bytes() == b"first-v1"
+    assert second_destination.read_bytes() == b"second-v1"
+    state = rw._load_state(state_path)
+    assert state is not None
+    first_entry = _entry(state["created_files"], first_destination)
+    second_entry = _entry(state["created_files"], second_destination)
+    assert first_entry is not None
+    assert second_entry is not None
+    assert first_entry["installed_sha256"] == hashlib.sha256(b"first-v1").hexdigest()
+    assert second_entry["installed_sha256"] == hashlib.sha256(b"second-v1").hexdigest()
+
+    payloads["Program Files/first.dll"] = b"first-v2"
+    payloads["Program Files/second.dll"] = b"second-v2"
+    events.clear()
+    adapter.apply_plan(plan)
+
+    assert reads == expected_reads + expected_reads
+    assert events[:2] == [f"read:{member}" for member in expected_reads]
+    assert first_destination.read_bytes() == b"first-v2"
+    assert second_destination.read_bytes() == b"second-v2"
+    state = rw._load_state(state_path)
+    assert state is not None
+    first_entry = _entry(state["created_files"], first_destination)
+    second_entry = _entry(state["created_files"], second_destination)
+    assert first_entry is not None
+    assert second_entry is not None
+    assert first_entry["installed_sha256"] == hashlib.sha256(b"first-v2").hexdigest()
+    assert second_entry["installed_sha256"] == hashlib.sha256(b"second-v2").hexdigest()

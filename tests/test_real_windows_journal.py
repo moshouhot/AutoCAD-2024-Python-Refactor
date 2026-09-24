@@ -252,6 +252,64 @@ def test_upgrade_releases_registry_value_changed_externally(tmp_path: Path, monk
     assert not state_path.exists()
 
 
+def test_upgrade_releases_external_value_even_when_it_matches_next_wanted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_CURRENT_USER\SOFTWARE\Autodesk\Owned"
+    memory.keys.add(key)
+    memory.values[(key, "Setting")] = {"type": 1, "data": "before"}
+    state_path = tmp_path / "state.json"
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+
+    first = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Setting", "sz", "A"),
+            WriteInstallState(state_path, {"version": 1}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+    second = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Setting", "sz", "B"),
+            WriteInstallState(state_path, {"version": 2}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    adapter.apply_plan(first)
+    memory.values[(key, "Setting")] = {"type": 1, "data": "B"}
+
+    real_set_value = rw._set_registry_value
+    writes: list[str] = []
+
+    def spy_set_value(operation: SetRegistryValue) -> None:
+        writes.append(str(operation.data))
+        real_set_value(operation)
+
+    monkeypatch.setattr(rw, "_set_registry_value", spy_set_value)
+    adapter.apply_plan(second)
+
+    identity = rw._registry_identity(key, "Setting")
+    state = rw._load_state(state_path)
+    assert state is not None
+    entry = state["registry_values"][identity]
+    assert entry["released"] is True
+    assert entry["released_snapshot"] == {"type": 1, "data": "B"}
+    assert writes == []
+    assert memory.values[(key, "Setting")] == {"type": 1, "data": "B"}
+
+    report = adapter.uninstall(state_path)
+    assert report.conflicts == ()
+    assert memory.values[(key, "Setting")] == {"type": 1, "data": "B"}
+    assert not state_path.exists()
+
+
 def test_upgrade_updates_registry_value_when_still_installer_owned(tmp_path: Path, monkeypatch) -> None:
     memory = RegistryMemory()
     patch_registry_backend(monkeypatch, memory)

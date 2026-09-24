@@ -202,6 +202,7 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
             "reuse": report.file_reuse,
             "create": report.file_create,
             "conflict": report.file_conflict,
+            "upgrade": report.file_upgrade,
         },
         "details": list(report.details),
     }
@@ -222,7 +223,8 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
         print(
             "Files        : "
             f"same={report.file_same} reuse={report.file_reuse} "
-            f"create={report.file_create} conflict={report.file_conflict}"
+            f"create={report.file_create} conflict={report.file_conflict} "
+            f"upgrade={report.file_upgrade}"
         )
         for detail in report.details[:20]:
             print(f"  - {detail}")

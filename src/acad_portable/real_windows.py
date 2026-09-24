@@ -229,6 +229,19 @@ class RealWindowsAdapter:
             raise RuntimeError("install plan has no state-file operation")
 
         state_path = state_op.path
+
+        # Read-all-before-mutate: every archive member the plan requires is
+        # extracted and validated up front, before the state file or any
+        # registry/junction/shortcut/destination mutation happens.  A bad
+        # password, a corrupt archive or a missing member therefore fails with
+        # zero system changes instead of after a partial apply.  The bytes are
+        # cached for this single apply only and reused by the matching
+        # InstallArchiveFile operation, so no member is ever read twice.
+        archive_payloads: dict[int, bytes] = {}
+        for index, operation in enumerate(plan.operations):
+            if isinstance(operation, InstallArchiveFile):
+                archive_payloads[index] = _read_archive_member(operation)
+
         state = _load_state(state_path) or _new_state()
         state["status"] = "applying"
         state["install_payload"] = state_op.payload
@@ -236,10 +249,10 @@ class RealWindowsAdapter:
 
         applied = 0
         try:
-            for operation in plan.operations:
+            for index, operation in enumerate(plan.operations):
                 if isinstance(operation, WriteInstallState):
                     continue
-                self._apply(operation, state)
+                self._apply(operation, state, archive_payloads.get(index))
                 applied += 1
             self._reconcile_retired_registry_ownership(plan, state)
             self._reconcile_retired_file_ownership(plan, state)
@@ -472,7 +485,12 @@ class RealWindowsAdapter:
             state_path.unlink(missing_ok=True)
         return report
 
-    def _apply(self, operation: Operation, state: dict[str, Any]) -> None:
+    def _apply(
+        self,
+        operation: Operation,
+        state: dict[str, Any],
+        archive_payload: bytes | None = None,
+    ) -> None:
         if isinstance(operation, EnsureRegistryKey):
             canonical_key = operation.key.rstrip("\\").casefold()
             if not _registry_key_exists(operation.key):
@@ -486,10 +504,14 @@ class RealWindowsAdapter:
             identity = _registry_identity(operation.key, operation.name)
             values = state.setdefault("registry_values", {})
             current = _query_registry_value(operation.key, operation.name)
-            if current is not None and _registry_operation_matches_snapshot(operation, current):
-                return
             entry = values.get(identity)
             if entry is not None:
+                # Ownership is decided before the wanted-value fast path: a
+                # journaled value that was changed externally is released even
+                # when the external bytes happen to equal the new wanted value,
+                # so uninstall can never treat them as installer-owned.  An
+                # entry that is still installer-owned falls through and is
+                # updated to the new wanted value.
                 if entry.get("released"):
                     entry["released_snapshot"] = current
                     return
@@ -498,6 +520,11 @@ class RealWindowsAdapter:
                     entry["released_snapshot"] = current
                     return
             else:
+                # The wanted-value fast path only applies when there is no
+                # journal entry: with no ownership to protect, a current value
+                # that already matches is a no-op.
+                if current is not None and _registry_operation_matches_snapshot(operation, current):
+                    return
                 if operation.preserve_existing and current is not None:
                     return
                 entry = {"before": current}
@@ -537,7 +564,11 @@ class RealWindowsAdapter:
             return
 
         if isinstance(operation, InstallArchiveFile):
-            payload = _read_archive_member(operation)
+            if archive_payload is None:
+                raise RuntimeError(
+                    "archive payload was not preflighted for this operation"
+                )
+            payload = archive_payload
             wanted_sha = hashlib.sha256(payload).hexdigest()
             created = state.setdefault("created_files", {})
             # lexists() is the single existence gate: it is True for dangling
