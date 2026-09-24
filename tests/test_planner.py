@@ -403,12 +403,17 @@ def test_vba_base_plan_includes_minimal_msi_identity_and_excludes_untraced_insta
         encoding="utf-16",
     )
     append_vba_msi_fixture(layout)
+    windows_root = tmp_path / "Windows"
+    system32 = windows_root / "System32"
+    system32.mkdir(parents=True)
+    (system32 / "FM20.DLL").write_bytes(b"")
+    (system32 / "FM20chs.DLL").write_bytes(b"")
     folders = KnownFolders(
         user_profile=Path(r"C:\Users\Tester"),
         appdata=Path(r"C:\Users\Tester\AppData\Roaming"),
         local_appdata=Path(r"C:\Users\Tester\AppData\Local"),
         desktop=Path(r"C:\Users\Tester\Desktop"),
-        windows=Path(r"C:\Windows"),
+        windows=windows_root,
         program_data=Path(r"C:\ProgramData"),
         public=Path(r"C:\Users\Public"),
         program_files=Path(r"C:\Program Files"),
@@ -476,7 +481,9 @@ def test_vba_base_plan_includes_minimal_msi_identity_and_excludes_untraced_insta
     )
     assert any(
         op.key.endswith("\\" + VBA71_FM20_PACKED_COMPONENT)
-        and str(op.data).lower().endswith(r"\windows\system32\fm20.dll")
+        and str(op.data).replace("/", "\\").lower().endswith(
+            r"\windows\system32\fm20.dll"
+        )
         for op in component_values
     )
 
@@ -509,10 +516,11 @@ def test_vba_base_plan_includes_minimal_msi_identity_and_excludes_untraced_insta
         for op in values
         if op.key.endswith(r"SOFTWARE\Microsoft\VBA") and op.name == "Vbe71DllPath"
     )
-    assert str(vbe_path.data).startswith(
+    vbe_path_text = str(vbe_path.data).replace("/", "\\")
+    assert vbe_path_text.startswith(
         r"C:\Program Files\Common Files\Microsoft Shared\VBA"
     )
-    assert "PROGRA~1" not in str(vbe_path.data).upper()
+    assert "PROGRA~1" not in vbe_path_text.upper()
     assert vbe_path.preserve_existing is True
     msi_values = [
         op
