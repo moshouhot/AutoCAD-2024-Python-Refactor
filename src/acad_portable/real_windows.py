@@ -1116,11 +1116,74 @@ def _file_sha256(path: Path) -> str | None:
     return digest.hexdigest()
 
 
+def _safe_member_parts(member: str) -> tuple[str, ...]:
+    """Split an archive member into path components, refusing unsafe ones.
+
+    Separator normalization is allowed, but rooted/drive semantics are never
+    stripped.  Absolute paths, UNC paths, drive-relative/drive-absolute paths,
+    empty members, and ``..`` traversal all fail closed before extraction.
+    The returned parts are the single source used to build the extractor target.
+    """
+    normalized = member.replace("\\", "/")
+    if not normalized or normalized.startswith("/"):
+        raise RuntimeError(f"unsafe archive member path: {member}")
+    if ntpath.splitdrive(normalized)[0]:
+        raise RuntimeError(f"unsafe archive member path: {member}")
+
+    relative = Path(normalized)
+    parts = relative.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise RuntimeError(f"unsafe archive member path: {member}")
+    if relative.is_absolute():
+        raise RuntimeError(f"unsafe archive member path: {member}")
+    return parts
+
+
+def _validated_extracted_member(temp_root: Path, member: str) -> Path:
+    """Return the resolved path of an extracted member, refusing any escape.
+
+    Extraction tools honour symlink/reparse entries, so a tampered archive can
+    make the requested member -- or a parent directory inside the extraction
+    root -- a link that points outside ``temp_root``.  Before the payload is
+    read, the extraction root and every component of the member path are
+    lstat-checked for symlink/reparse attributes, then both paths are resolved
+    with ``strict=True`` and the member must land strictly inside the root.
+    Any failure raises ``RuntimeError``; nothing is ever read through a link.
+    """
+    parts = _safe_member_parts(member)
+
+    if _is_reparse_or_symlink(temp_root):
+        raise RuntimeError(
+            f"archive extraction root is a reparse point: {temp_root}"
+        )
+    current = temp_root
+    for part in parts:
+        current = current / part
+        if _is_reparse_or_symlink(current):
+            raise RuntimeError(
+                f"archive member traverses a reparse point: {current}"
+            )
+
+    try:
+        resolved_root = temp_root.resolve(strict=True)
+        resolved_member = current.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f"archive member could not be resolved: {member}: {exc}"
+        ) from exc
+
+    if resolved_member == resolved_root or not resolved_member.is_relative_to(
+        resolved_root
+    ):
+        raise RuntimeError(
+            f"archive member escapes the extraction root: {member} -> {resolved_member}"
+        )
+    return resolved_member
+
+
 def _read_archive_member(operation: InstallArchiveFile) -> bytes:
-    member = operation.member.replace("\\", "/").lstrip("/")
-    parts = Path(member).parts
-    if not member or any(part in {"", ".", ".."} for part in parts):
-        raise RuntimeError(f"unsafe archive member path: {operation.member}")
+    parts = _safe_member_parts(operation.member)
+    member = "/".join(parts)
 
     with tempfile.TemporaryDirectory(prefix="acad-portable-archive-") as temp_dir:
         temp_root = Path(temp_dir)
@@ -1165,7 +1228,7 @@ def _read_archive_member(operation: InstallArchiveFile) -> bytes:
                 raise RuntimeError(
                     f"Python archive extraction failed for {operation.archive}: {exc}"
                 ) from exc
-        extracted = temp_root / Path(member)
+        extracted = _validated_extracted_member(temp_root, member)
         if not extracted.is_file():
             raise RuntimeError(
                 f"archive member was not extracted: {operation.archive} :: {operation.member}"
