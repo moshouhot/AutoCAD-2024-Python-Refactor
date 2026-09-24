@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -914,3 +915,412 @@ def test_uninstall_refuses_reparse_destination_itself(tmp_path: Path, monkeypatc
     assert report.files_removed == 0
     assert any("reparse point" in conflict for conflict in report.conflicts)
     assert target.read_bytes() == b"runtime-v1"
+
+
+# --- P2-3: diff exposes retired ownership absent from the new plan ----------
+
+
+def _registry_and_file_plan(
+    state_path: Path,
+    archive: Path,
+    destination: Path,
+    *,
+    key: str,
+    name: str,
+    value: str,
+    version: int,
+    include_registry: bool = True,
+    include_file: bool = True,
+) -> InstallPlan:
+    operations: list[object] = []
+    if include_registry:
+        operations.append(EnsureRegistryKey(key))
+        operations.append(SetRegistryValue(key, name, "sz", value))
+    if include_file:
+        operations.append(
+            rw.InstallArchiveFile(archive, "Program Files/runtime.dll", destination, "zzz")
+        )
+    operations.append(WriteInstallState(state_path, {"version": version}))
+    return InstallPlan(operations=tuple(operations), warnings=(), metadata={})
+
+
+def test_live_diff_reports_retired_registry_and_file(tmp_path: Path, monkeypatch) -> None:
+    """A prior plan's registry value and archive file must appear as retire."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    state_path = tmp_path / "state.json"
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Retired"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _registry_and_file_plan(
+            state_path, archive, destination, key=key, name="Setting", value="owned", version=1
+        )
+    )
+    state_before = state_path.read_bytes()
+    file_before = destination.read_bytes()
+    registry_before = memory.snapshot(key, "Setting")
+
+    report = rw.inspect_live_diff(
+        _registry_and_file_plan(
+            state_path,
+            archive,
+            destination,
+            key=key,
+            name="Setting",
+            value="owned",
+            version=2,
+            include_registry=False,
+            include_file=False,
+        ),
+        allow_non_windows_for_tests=True,
+    )
+
+    assert report.registry_retire == 1
+    assert report.file_retire == 1
+    assert report.registry_same == 0
+    assert report.file_same == 0
+    # Read-only: no system, file or state mutation.
+    assert state_path.read_bytes() == state_before
+    assert destination.read_bytes() == file_before
+    assert memory.snapshot(key, "Setting") == registry_before
+
+
+def test_live_diff_registry_retire_branches(tmp_path: Path, monkeypatch) -> None:
+    """Remove, restore and external-release must each be reported distinctly."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Retire"
+    remove_key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Remove"
+    restore_key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Restore"
+    external_key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\External"
+    state_path = tmp_path / "state.json"
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    memory.keys.add(restore_key)
+    memory.set(restore_key, "Setting", {"type": 1, "data": "preexisting"})
+
+    adapter.apply_plan(
+        InstallPlan(
+            operations=(
+                EnsureRegistryKey(remove_key),
+                SetRegistryValue(remove_key, "Setting", "sz", "owned"),
+                EnsureRegistryKey(restore_key),
+                SetRegistryValue(restore_key, "Setting", "sz", "owned"),
+                EnsureRegistryKey(external_key),
+                SetRegistryValue(external_key, "Setting", "sz", "owned"),
+                WriteInstallState(state_path, {"version": 1}),
+            ),
+            warnings=(),
+            metadata={},
+        )
+    )
+    memory.set(external_key, "Setting", {"type": 1, "data": "external-change"})
+
+    report = rw.inspect_live_diff(_no_file_plan(state_path), allow_non_windows_for_tests=True)
+
+    assert report.registry_retire == 3
+    joined = "\n".join(report.details).casefold()
+    assert f"{remove_key.casefold()} [setting] (will remove)" in joined
+    assert f"{restore_key.casefold()} [setting] (will restore previous value)" in joined
+    assert "reg_retire_external" in joined and external_key.casefold() in joined
+    # The registry itself is untouched by a diff.
+    assert memory.snapshot(external_key, "Setting")["data"] == "external-change"
+
+
+def test_live_diff_retired_owned_file_detail_says_remove(tmp_path: Path, monkeypatch) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _registry_and_file_plan(
+            state_path,
+            archive,
+            destination,
+            key=r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Retired",
+            name="Setting",
+            value="owned",
+            version=1,
+        )
+    )
+
+    report = rw.inspect_live_diff(_no_file_plan(state_path), allow_non_windows_for_tests=True)
+
+    assert report.file_retire == 1
+    detail = next(d for d in report.details if str(destination) in d)
+    assert "will remove" in detail.lower()
+    assert "released_external" not in detail.lower()
+
+
+def test_live_diff_retired_external_changed_file_detail_is_release(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _registry_and_file_plan(
+            state_path,
+            archive,
+            destination,
+            key=r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Retired",
+            name="Setting",
+            value="owned",
+            version=1,
+        )
+    )
+    destination.write_bytes(b"external-change")
+
+    report = rw.inspect_live_diff(_no_file_plan(state_path), allow_non_windows_for_tests=True)
+
+    assert report.file_retire == 1
+    detail = next(d for d in report.details if str(destination) in d)
+    assert "released_external" in detail.lower()
+    assert "will remove" not in detail.lower()
+
+
+def test_live_diff_retired_missing_file_detail_says_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _registry_and_file_plan(
+            state_path,
+            archive,
+            destination,
+            key=r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Retired",
+            name="Setting",
+            value="owned",
+            version=1,
+        )
+    )
+    destination.unlink()
+
+    report = rw.inspect_live_diff(_no_file_plan(state_path), allow_non_windows_for_tests=True)
+
+    assert report.file_retire == 1
+    detail = next(d for d in report.details if str(destination) in d)
+    assert "MISSING" in detail.upper()
+
+
+def test_live_diff_retired_reparse_file_is_not_hashed(tmp_path: Path, monkeypatch) -> None:
+    """Reparse-before-hash: a swapped-in link is released, never hashed."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _registry_and_file_plan(
+            state_path,
+            archive,
+            destination,
+            key=r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Retired",
+            name="Setting",
+            value="owned",
+            version=1,
+        )
+    )
+    destination.unlink()
+    target = tmp_path / "unrelated.dll"
+    target.write_bytes(b"unrelated")
+    try:
+        os.symlink(target, destination)
+    except (OSError, NotImplementedError):
+        import pytest
+
+        pytest.skip("host does not allow creating symlinks")
+
+    hashed: list[str] = []
+    real_sha = rw._file_sha256
+
+    def spy_sha(path):
+        hashed.append(str(path))
+        return real_sha(path)
+
+    monkeypatch.setattr(rw, "_file_sha256", spy_sha)
+    report = rw.inspect_live_diff(_no_file_plan(state_path), allow_non_windows_for_tests=True)
+
+    assert report.file_retire == 1
+    assert str(destination) not in hashed
+    detail = next(d for d in report.details if str(destination) in d)
+    assert "REPARSE" in detail.upper()
+
+
+# --- P2-4: recreate must not leave canonical duplicate journal keys ---------
+
+
+def test_missing_destination_recreate_collapses_equivalent_stale_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    other = tmp_path / "Apps64" / "keep.dll"
+    state_path = tmp_path / "state.json"
+    payload = {"value": b"runtime-v1"}
+    monkeypatch.setattr(
+        rw,
+        "_read_archive_member",
+        lambda op: payload["value"] if op.destination == destination else b"keep-v1",
+    )
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        InstallPlan(
+            operations=(
+                rw.InstallArchiveFile(archive, "Program Files/runtime.dll", destination, "zzz"),
+                rw.InstallArchiveFile(archive, "Program Files/keep.dll", other, "zzz"),
+                WriteInstallState(state_path, {"version": 1}),
+            ),
+            warnings=(),
+            metadata={},
+        )
+    )
+
+    # Simulate a stale journal whose key is a different casing/separator
+    # spelling of the same Windows canonical path, still holding the old hash.
+    # A stale ``pending_files`` intent with the same canonical identity is
+    # planted too, to prove the recreate path collapses it as well.
+    state = rw._load_state(state_path)
+    assert state is not None
+    raw_key = rw._find_file_entry_key(state["created_files"], destination)
+    assert raw_key is not None
+    stale_key = str(raw_key).replace("\\", "/").upper()
+    assert stale_key != raw_key
+    state["created_files"][stale_key] = state["created_files"].pop(raw_key)
+    state["pending_files"][stale_key] = {"installed_sha256": "stale-pending"}
+    rw._write_state(state_path, state)
+
+    # The real destination is missing; the next apply recreates a new payload.
+    destination.unlink()
+    payload["value"] = b"runtime-v2"
+    new_sha = hashlib.sha256(b"runtime-v2").hexdigest()
+    adapter.apply_plan(
+        InstallPlan(
+            operations=(
+                rw.InstallArchiveFile(archive, "Program Files/runtime.dll", destination, "zzz"),
+                rw.InstallArchiveFile(archive, "Program Files/keep.dll", other, "zzz"),
+                WriteInstallState(state_path, {"version": 2}),
+            ),
+            warnings=(),
+            metadata={},
+        )
+    )
+
+    state = rw._load_state(state_path)
+    assert state is not None
+    canonical_dest = ntpath.normpath(str(destination).replace("/", "\\")).casefold()
+    equivalents = [
+        key
+        for key in state["created_files"]
+        if ntpath.normpath(str(key).replace("/", "\\")).casefold() == canonical_dest
+    ]
+    assert len(equivalents) == 1
+    # The single surviving key uses this round's actual destination spelling.
+    assert equivalents[0] == str(destination)
+    owned = _entry(state["created_files"], destination)
+    assert owned is not None and owned["installed_sha256"] == new_sha
+    assert destination.read_bytes() == b"runtime-v2"
+    # No canonical-equivalent stale pending intent remains.
+    assert all(
+        ntpath.normpath(str(key).replace("/", "\\")).casefold() != canonical_dest
+        for key in state["pending_files"]
+    )
+    # A different canonical path keeps its own ownership entry.
+    assert _entry(state["created_files"], other) is not None
+
+    # A second identical apply must classify as same, not be fooled by the
+    # stale hash, and a real upgrade to a third payload must still work.
+    report = rw.inspect_live_diff(
+        InstallPlan(
+            operations=(
+                rw.InstallArchiveFile(archive, "Program Files/runtime.dll", destination, "zzz"),
+                rw.InstallArchiveFile(archive, "Program Files/keep.dll", other, "zzz"),
+                WriteInstallState(state_path, {"version": 2}),
+            ),
+            warnings=(),
+            metadata={},
+        ),
+        allow_non_windows_for_tests=True,
+    )
+    assert report.file_same == 2
+    assert report.file_conflict == 0
+    assert report.file_upgrade == 0
+
+    # An actual same-payload reapply must be a clean no-op and keep exactly
+    # one canonical ownership key.
+    adapter.apply_plan(
+        InstallPlan(
+            operations=(
+                rw.InstallArchiveFile(archive, "Program Files/runtime.dll", destination, "zzz"),
+                rw.InstallArchiveFile(archive, "Program Files/keep.dll", other, "zzz"),
+                WriteInstallState(state_path, {"version": 2}),
+            ),
+            warnings=(),
+            metadata={},
+        )
+    )
+    assert destination.read_bytes() == b"runtime-v2"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert (
+        len(
+            [
+                key
+                for key in state["created_files"]
+                if ntpath.normpath(str(key).replace("/", "\\")).casefold()
+                == canonical_dest
+            ]
+        )
+        == 1
+    )
+
+    payload["value"] = b"runtime-v3"
+    adapter.apply_plan(
+        InstallPlan(
+            operations=(
+                rw.InstallArchiveFile(archive, "Program Files/runtime.dll", destination, "zzz"),
+                rw.InstallArchiveFile(archive, "Program Files/keep.dll", other, "zzz"),
+                WriteInstallState(state_path, {"version": 3}),
+            ),
+            warnings=(),
+            metadata={},
+        )
+    )
+    assert destination.read_bytes() == b"runtime-v3"
+    state = rw._load_state(state_path)
+    assert state is not None
+    upgraded = _entry(state["created_files"], destination)
+    assert upgraded is not None and upgraded["installed_sha256"] == hashlib.sha256(
+        b"runtime-v3"
+    ).hexdigest()
+
+    uninstall_report = adapter.uninstall(state_path)
+    assert uninstall_report.conflicts == ()
+    assert uninstall_report.files_removed == 2
+    assert not destination.exists()
+    assert not other.exists()

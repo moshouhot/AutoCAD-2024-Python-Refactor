@@ -343,3 +343,62 @@ def test_partial_retirement_failure_rolls_back_already_deleted_file(
     assert state["status"] == "failed"
     assert _entry(state["created_files"], first) is not None
     assert _entry(state["created_files"], second) is not None
+
+
+# --- P2-1: non-file replacement at an owned destination is a conflict --------
+
+
+def test_uninstall_conflicts_when_owned_file_replaced_by_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An external directory at an owned path is a conflict, not a silent no-op."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _archive_plan(state_path, archive, "Program Files/runtime.dll", destination)
+    )
+
+    # Replace the owned regular file with a directory holding unrelated data.
+    destination.unlink()
+    destination.mkdir()
+    (destination / "external.txt").write_text("external", encoding="utf-8")
+
+    report = adapter.uninstall(state_path)
+
+    assert report.conflicts != ()
+    assert report.files_removed == 0
+    assert destination.is_dir()
+    assert (destination / "external.txt").read_text(encoding="utf-8") == "external"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["status"] == "uninstall_conflicts"
+
+
+def test_uninstall_genuinely_missing_owned_file_is_not_a_conflict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _archive_plan(state_path, archive, "Program Files/runtime.dll", destination)
+    )
+
+    destination.unlink()
+
+    report = adapter.uninstall(state_path)
+
+    assert report.conflicts == ()
+    assert report.files_removed == 0
+    assert not state_path.exists()

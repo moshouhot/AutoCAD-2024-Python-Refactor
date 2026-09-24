@@ -187,6 +187,7 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
             "external_preserved": report.registry_external_preserved,
             "create": report.registry_create,
             "keys_create": report.registry_keys_create,
+            "retire": report.registry_retire,
         },
         "junctions": {
             "same": report.junction_same,
@@ -203,6 +204,7 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
             "create": report.file_create,
             "conflict": report.file_conflict,
             "upgrade": report.file_upgrade,
+            "retire": report.file_retire,
         },
         "details": list(report.details),
     }
@@ -213,7 +215,8 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
             "Registry     : "
             f"same={report.registry_same} change={report.registry_change} "
             f"external_preserved={report.registry_external_preserved} "
-            f"create={report.registry_create} keys_create={report.registry_keys_create}"
+            f"create={report.registry_create} keys_create={report.registry_keys_create} "
+            f"retire={report.registry_retire}"
         )
         print(
             "Junctions    : "
@@ -224,7 +227,7 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
             "Files        : "
             f"same={report.file_same} reuse={report.file_reuse} "
             f"create={report.file_create} conflict={report.file_conflict} "
-            f"upgrade={report.file_upgrade}"
+            f"upgrade={report.file_upgrade} retire={report.file_retire}"
         )
         for detail in report.details[:20]:
             print(f"  - {detail}")

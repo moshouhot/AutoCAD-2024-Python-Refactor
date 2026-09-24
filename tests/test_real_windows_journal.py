@@ -814,3 +814,123 @@ def test_live_diff_classifies_archive_files_without_writing(tmp_path: Path, monk
     assert report.file_conflict == 1
     assert any(str(conflict) in detail for detail in report.details)
     assert not create.exists()
+
+
+# --- P2-2: registry ownership is decided before any wanted-value match -------
+
+
+def test_live_diff_prior_ownership_beats_wanted_value_match(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """owned A -> external B -> next plan wants B must be external, never same."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Owned"
+    state_path = tmp_path / "state.json"
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(make_plan(state_path, key, "A"))
+
+    # An external process overwrites our value with B, which the next plan
+    # also happens to want.  Apply releases ownership in this case, so the
+    # diff must not report a wanted-value match.
+    memory.set(key, "AcadLocation", {"type": 1, "data": "B"})
+
+    report = rw.inspect_live_diff(
+        make_plan(state_path, key, "B"), allow_non_windows_for_tests=True
+    )
+
+    assert report.registry_external_preserved == 1
+    assert report.registry_same == 0
+    assert report.registry_change == 0
+
+
+def test_live_diff_active_owned_value_wanted_match_is_same(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Owned"
+    state_path = tmp_path / "state.json"
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(make_plan(state_path, key, "A"))
+
+    report = rw.inspect_live_diff(
+        make_plan(state_path, key, "A"), allow_non_windows_for_tests=True
+    )
+
+    assert report.registry_same == 1
+    assert report.registry_external_preserved == 0
+
+
+def test_live_diff_no_journal_external_equal_to_wanted_is_same(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Unowned"
+    memory.keys.add(key)
+    memory.set(key, "AcadLocation", {"type": 1, "data": "B"})
+
+    report = rw.inspect_live_diff(
+        make_plan(tmp_path / "state.json", key, "B"),
+        allow_non_windows_for_tests=True,
+    )
+
+    assert report.registry_same == 1
+    assert report.registry_external_preserved == 0
+    assert not (tmp_path / "state.json").exists()
+
+
+def test_live_diff_released_entry_equal_to_wanted_is_external(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A journaled-but-released value must stay external even if it equals wanted."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Owned"
+    state_path = tmp_path / "state.json"
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(make_plan(state_path, key, "A"))
+    # External process changes it; a re-apply of A observes the mismatch and
+    # marks our ownership released.
+    memory.set(key, "AcadLocation", {"type": 1, "data": "B"})
+    adapter.apply_plan(make_plan(state_path, key, "A"))
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["registry_values"][rw._registry_identity(key, "AcadLocation")]["released"]
+
+    report = rw.inspect_live_diff(
+        make_plan(state_path, key, "B"), allow_non_windows_for_tests=True
+    )
+
+    assert report.registry_external_preserved == 1
+    assert report.registry_same == 0
+
+
+def test_live_diff_preserve_existing_does_not_block_owned_upgrade(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An installer-owned value is still upgradable under preserve_existing."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Owned"
+    state_path = tmp_path / "state.json"
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(make_plan(state_path, key, "A"))
+
+    upgrade = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "AcadLocation", "sz", "B", preserve_existing=True),
+            WriteInstallState(state_path, {"version": 2}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+    report = rw.inspect_live_diff(upgrade, allow_non_windows_for_tests=True)
+
+    assert report.registry_change == 1
+    assert report.registry_external_preserved == 0
+
+    adapter.apply_plan(upgrade)
+    assert memory.values[(key, "AcadLocation")]["data"] == "B"

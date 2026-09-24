@@ -66,6 +66,8 @@ class LiveDiffReport:
     file_conflict: int
     details: tuple[str, ...]
     file_upgrade: int = 0
+    registry_retire: int = 0
+    file_retire: int = 0
 
 
 def inspect_live_diff(
@@ -92,12 +94,24 @@ def inspect_live_diff(
     file_create = 0
     file_conflict = 0
     file_upgrade = 0
+    registry_retire = 0
+    file_retire = 0
     details: list[str] = []
 
     state_op = next((op for op in plan.operations if isinstance(op, WriteInstallState)), None)
     prior_state = _load_state(state_op.path) if state_op is not None else None
     prior_values = (prior_state or {}).get("registry_values", {})
     prior_files = (prior_state or {}).get("created_files", {})
+    planned_registry_ids = {
+        _registry_identity(operation.key, operation.name)
+        for operation in plan.operations
+        if isinstance(operation, SetRegistryValue)
+    }
+    planned_destinations = {
+        _windows_path_key(operation.destination)
+        for operation in plan.operations
+        if isinstance(operation, InstallArchiveFile)
+    }
 
     for operation in plan.operations:
         if isinstance(operation, EnsureRegistryKey):
@@ -109,33 +123,39 @@ def inspect_live_diff(
             current = _query_registry_value(operation.key, operation.name)
             identity = _registry_identity(operation.key, operation.name)
             prior_entry = prior_values.get(identity)
-            wanted = {
-                "type": _registry_kind(operation.kind),
-                "data": _encode_json_value(operation.data),
-            }
-            if current is None:
-                if prior_entry is not None and (
-                    prior_entry.get("released")
-                    or not _registry_snapshot_equal(current, prior_entry.get("installed"))
+            if prior_entry is not None:
+                # Ownership is decided before the wanted-value fast path: a
+                # journaled value that was released or changed externally is
+                # reported as external even when the current bytes happen to
+                # equal the new wanted value.  An entry that is still
+                # installer-owned is judged by the wanted value, and
+                # ``preserve_existing`` must never block our own upgrade.
+                if prior_entry.get("released") or not _registry_snapshot_equal(
+                    current, prior_entry.get("installed")
                 ):
                     registry_external_preserved += 1
                     if len(details) < 100:
-                        details.append(f"REG_EXTERNAL_PRESERVED {operation.key} [{operation.name}]")
+                        details.append(
+                            f"REG_EXTERNAL_PRESERVED {operation.key} [{operation.name}]"
+                        )
+                elif current is not None and _registry_operation_matches_snapshot(
+                    operation, current
+                ):
+                    registry_same += 1
                 else:
-                    registry_create += 1
+                    registry_change += 1
+                    if len(details) < 100:
+                        details.append(f"REG_CHANGE {operation.key} [{operation.name}]")
+            elif current is None:
+                registry_create += 1
             elif _registry_operation_matches_snapshot(operation, current):
                 registry_same += 1
-            elif prior_entry is not None and (
-                prior_entry.get("released")
-                or not _registry_snapshot_equal(current, prior_entry.get("installed"))
-            ):
-                registry_external_preserved += 1
-                if len(details) < 100:
-                    details.append(f"REG_EXTERNAL_PRESERVED {operation.key} [{operation.name}]")
             elif operation.preserve_existing:
                 registry_external_preserved += 1
                 if len(details) < 100:
-                    details.append(f"REG_EXTERNAL_PRESERVED {operation.key} [{operation.name}]")
+                    details.append(
+                        f"REG_EXTERNAL_PRESERVED {operation.key} [{operation.name}]"
+                    )
             else:
                 registry_change += 1
                 if len(details) < 100:
@@ -201,6 +221,55 @@ def inspect_live_diff(
                     if len(details) < 100:
                         details.append(f"FILE_CONFLICT {operation.destination}")
 
+    # Retirement reporting: the apply reconciliation passes retire prior
+    # registry values and archive files that are absent from the new plan.
+    # Those actions were previously invisible to a diff, so they are counted
+    # here as dedicated aggregates instead of being folded into change/upgrade.
+    # This pass is strictly read-only and mirrors the reconciliation branches
+    # (reparse before hash, ownership before wanted value) without writing.
+    for identity in prior_values:
+        if identity in planned_registry_ids:
+            continue
+        registry_retire += 1
+        key, name = identity.split("\u0000", 1)
+        entry = prior_values[identity]
+        current = _query_registry_value(key, name)
+        installed = entry.get("installed")
+        if entry.get("released") or not _registry_snapshot_equal(current, installed):
+            detail = (
+                f"REG_RETIRE_EXTERNAL {key} [{name}] "
+                "(release ownership, preserve external value)"
+            )
+        elif entry.get("before") is None:
+            detail = f"REG_RETIRE {key} [{name}] (will remove)"
+        else:
+            detail = f"REG_RETIRE {key} [{name}] (will restore previous value)"
+        if len(details) < 100:
+            details.append(detail)
+
+    for path_text, entry in prior_files.items():
+        path = Path(path_text)
+        if _windows_path_key(path) in planned_destinations:
+            continue
+        file_retire += 1
+        installed_sha = entry.get("installed_sha256")
+        # Reparse checks stay ahead of existence/hashing, exactly as the
+        # reconciliation pass does: never hash or claim a delete through a
+        # link that could have been swapped in.
+        if _is_reparse_or_symlink(path) or _has_reparse_ancestor(path):
+            detail = f"FILE_RETIRE_RELEASED_REPARSE {path}"
+        elif not os.path.lexists(path):
+            detail = f"FILE_RETIRE_MISSING {path} (already absent)"
+        elif not path.is_file() or _file_sha256(path) != installed_sha:
+            detail = (
+                f"FILE_RETIRE_RELEASED_EXTERNAL {path} "
+                "(release ownership, preserve external file)"
+            )
+        else:
+            detail = f"FILE_RETIRE {path} (will remove)"
+        if len(details) < 100:
+            details.append(detail)
+
     return LiveDiffReport(
         registry_same=registry_same,
         registry_change=registry_change,
@@ -218,6 +287,8 @@ def inspect_live_diff(
         file_conflict=file_conflict,
         details=tuple(details),
         file_upgrade=file_upgrade,
+        registry_retire=registry_retire,
+        file_retire=file_retire,
     )
 
 
@@ -455,9 +526,20 @@ class RealWindowsAdapter:
             if _is_reparse_or_symlink(path) or _has_reparse_ancestor(path):
                 conflicts.append(f"file is or is below a reparse point: {path}")
                 continue
-            current_sha = _file_sha256(path) if path.is_file() else None
-            if current_sha is None:
+            if not os.path.lexists(path):
+                # Genuinely missing: nothing to undo, so this stays a no-op.
                 continue
+            if not path.is_file():
+                # An existing non-file object (directory, device, ...) has
+                # replaced our installer-owned file.  Deleting it would
+                # destroy external data, so it is a conflict and the state
+                # journal is kept for a later, informed decision.
+                conflicts.append(
+                    "installer-owned file replaced by an external non-file: "
+                    f"{path}"
+                )
+                continue
+            current_sha = _file_sha256(path)
             if current_sha != installed_sha:
                 conflicts.append(f"file changed externally: {path}")
                 continue
@@ -678,6 +760,7 @@ class RealWindowsAdapter:
             operation.destination.parent.mkdir(parents=True, exist_ok=True)
             _reject_reparse_path(operation.destination)
             entry_key = str(operation.destination)
+            canonical_key = _windows_path_key(entry_key)
             pending = {
                 "installed_sha256": wanted_sha,
                 "archive": str(operation.archive),
@@ -685,10 +768,31 @@ class RealWindowsAdapter:
             }
             # Record intent in memory before the destination is exposed so the
             # apply_plan failure handler can persist a diagnosable journal.
-            state.setdefault("pending_files", {})[entry_key] = pending
+            # Any canonical-equivalent stale intent is dropped first so a
+            # later failure can never read a duplicate entry with an old hash.
+            pending_files = state.setdefault("pending_files", {})
+            for stale_key in [
+                key
+                for key in pending_files
+                if key != entry_key and _windows_path_key(key) == canonical_key
+            ]:
+                del pending_files[stale_key]
+            pending_files[entry_key] = pending
             _atomic_write_bytes(operation.destination, payload)
+            # The new bytes are in place.  Collapse every canonical-equivalent
+            # stale ownership key onto the path spelling actually written, so
+            # the next same/upgrade/uninstall round cannot be misled by an old
+            # installed hash.  Unrelated canonical paths are left untouched,
+            # and prior ``created_files`` ownership is preserved until the
+            # write succeeds, so a write failure keeps it intact.
+            for stale_key in [
+                key
+                for key in created
+                if key != entry_key and _windows_path_key(key) == canonical_key
+            ]:
+                del created[stale_key]
             created[entry_key] = pending
-            state.get("pending_files", {}).pop(entry_key, None)
+            pending_files.pop(entry_key, None)
             return
 
         raise TypeError(f"unsupported operation: {type(operation).__name__}")
