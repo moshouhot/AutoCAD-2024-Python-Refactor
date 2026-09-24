@@ -223,6 +223,7 @@ def _patch_kernel32(monkeypatch, fake: _FakeKernel32) -> None:
     monkeypatch.setattr(rw, "_get_kernel32", lambda: fake)
 
 
+@_win_only
 def test_handle_read_failure_raises_and_closes_handle(tmp_path: Path, monkeypatch) -> None:
     destination = tmp_path / "Apps64" / "AcVba.arx"
     destination.parent.mkdir(parents=True)
@@ -239,6 +240,7 @@ def test_handle_read_failure_raises_and_closes_handle(tmp_path: Path, monkeypatc
     assert len(fake.closed) == len(fake._attrs)
 
 
+@_win_only
 def test_handle_disposition_failure_raises_and_closes_handle(tmp_path: Path, monkeypatch) -> None:
     destination = tmp_path / "Apps64" / "AcVba.arx"
     destination.parent.mkdir(parents=True)
@@ -254,6 +256,7 @@ def test_handle_disposition_failure_raises_and_closes_handle(tmp_path: Path, mon
     assert len(fake.closed) == len(fake._attrs)
 
 
+@_win_only
 def test_handle_metadata_failure_raises_and_closes_handle(tmp_path: Path, monkeypatch) -> None:
     destination = tmp_path / "Apps64" / "AcVba.arx"
     destination.parent.mkdir(parents=True)
@@ -267,6 +270,7 @@ def test_handle_metadata_failure_raises_and_closes_handle(tmp_path: Path, monkey
     assert destination.read_bytes() == b"payload-v1"
 
 
+@_win_only
 def test_handle_create_failure_raises_and_deletes_nothing(tmp_path: Path, monkeypatch) -> None:
     destination = tmp_path / "Apps64" / "AcVba.arx"
     destination.parent.mkdir(parents=True)
@@ -287,6 +291,7 @@ def test_handle_create_failure_raises_and_deletes_nothing(tmp_path: Path, monkey
     assert destination.read_bytes() == b"payload-v1"
 
 
+@_win_only
 def test_handle_reparse_attribute_is_external_and_closes_handle(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -304,6 +309,7 @@ def test_handle_reparse_attribute_is_external_and_closes_handle(
     assert len(fake.closed) == len(fake._attrs)
 
 
+@_win_only
 def test_handle_matching_hash_deletes_and_returns_exact_payload(
     tmp_path: Path, monkeypatch
 ) -> None:
