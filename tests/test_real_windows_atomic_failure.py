@@ -380,6 +380,79 @@ def test_archive_preflight_cache_reads_each_operation_once_and_refreshes_next_ap
     assert second_entry["installed_sha256"] == hashlib.sha256(b"second-v2").hexdigest()
 
 
+def test_archive_destination_conflict_preflights_before_registry_mutation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A strict destination conflict must fail before registry/state mutation.
+
+    The conflicting archive op is placed *after* registry operations in the
+    plan, so the preflight gate is the only thing that can prevent the registry
+    backend from being touched.
+    """
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    key = r"HKEY_CURRENT_USER\SOFTWARE\DestinationPreflight"
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"external-version")
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
+    plan = InstallPlan(
+        operations=(
+            EnsureRegistryKey(key),
+            SetRegistryValue(key, "Setting", "sz", "v1"),
+            InstallArchiveFile(
+                archive, "Program Files/runtime.dll", destination, "zzz"
+            ),
+            WriteInstallState(state_path, {"version": 1}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    with pytest.raises(RuntimeError, match="refusing to overwrite existing shared file"):
+        rw.RealWindowsAdapter(allow_non_windows_for_tests=True).apply_plan(plan)
+
+    # No registry mutation, no state file, and the external file is intact.
+    assert key not in memory.keys
+    assert (key, "Setting") not in memory.values
+    assert not state_path.exists()
+    assert destination.read_bytes() == b"external-version"
+
+
+def test_archive_destination_reuse_existing_passes_preflight(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An unowned different file with ``reuse_existing`` is not a preflight conflict."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "Common Files" / "runtime.dll"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"external-version")
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
+
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _archive_plan(
+            state_path,
+            archive,
+            "Program Files/Common Files/runtime.dll",
+            destination,
+            reuse_existing=True,
+        )
+    )
+
+    assert destination.read_bytes() == b"external-version"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["created_files"] == {}
+
+
 # --- H: Windows parent-junction race is closed by the directory-chain lock ---
 
 

@@ -558,3 +558,54 @@ def test_planner_publishes_configured_program_files_roots(tmp_path: Path) -> Non
 
     assert plan.metadata["program_files"] == r"D:\Apps64"
     assert plan.metadata["program_files_x86"] == r"D:\Apps32"
+
+
+# --- ProgramW6432: 32-bit Python on 64-bit Windows --------------------------
+
+
+def _clear_program_files_env(monkeypatch) -> None:
+    for name in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_known_folders_prefers_programw6432_for_native_root(monkeypatch) -> None:
+    """A 32-bit process must resolve the native 64-bit Program Files root.
+
+    Under WOW64, ``ProgramFiles`` points at ``C:\\Program Files (x86)`` while
+    ``ProgramW6432`` holds the real 64-bit root.  ``program_files`` must be
+    the native root and ``program_files_x86`` must stay on the x86 root.
+    """
+    _clear_program_files_env(monkeypatch)
+    monkeypatch.setenv("ProgramW6432", r"C:\Program Files")
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files (x86)")
+    monkeypatch.setenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
+
+    folders = KnownFolders.current()
+
+    assert folders.program_files == Path(r"C:\Program Files")
+    assert folders.program_files_x86 == Path(r"C:\Program Files (x86)")
+
+
+def test_known_folders_falls_back_to_programfiles_without_programw6432(monkeypatch) -> None:
+    """Without ``ProgramW6432`` the native root falls back to ``ProgramFiles``."""
+    _clear_program_files_env(monkeypatch)
+    monkeypatch.setenv("ProgramFiles", r"D:\Apps")
+    monkeypatch.setenv("ProgramFiles(x86)", r"D:\Apps32")
+
+    folders = KnownFolders.current()
+
+    assert folders.program_files == Path(r"D:\Apps")
+    assert folders.program_files_x86 == Path(r"D:\Apps32")
+
+
+def test_known_folders_never_uses_programw6432_as_x86_root(monkeypatch) -> None:
+    """The native root must never leak into the x86 root."""
+    _clear_program_files_env(monkeypatch)
+    monkeypatch.setenv("ProgramW6432", r"C:\Program Files")
+
+    folders = KnownFolders.current()
+
+    assert folders.program_files == Path(r"C:\Program Files")
+    # No x86 variables at all: the stable default is used, not ProgramW6432.
+    assert folders.program_files_x86 == Path(r"C:\Program Files (x86)")
+    assert folders.program_files_x86 != folders.program_files

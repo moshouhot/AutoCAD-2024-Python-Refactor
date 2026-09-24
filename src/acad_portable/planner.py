@@ -199,8 +199,19 @@ class KnownFolders:
         windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
         program_data = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
         public = Path(os.environ.get("PUBLIC", str(user.parent / "Public")))
-        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
-        program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+        # A 32-bit Python process on 64-bit Windows sees ``ProgramFiles`` as
+        # the x86 root; ``ProgramW6432`` is the native 64-bit root.  Prefer it
+        # for ``program_files`` and never use it as the x86 root.
+        program_files = Path(
+            os.environ.get("ProgramW6432")
+            or os.environ.get("ProgramFiles")
+            or r"C:\Program Files"
+        )
+        program_files_x86 = Path(
+            os.environ.get("ProgramFiles(x86)")
+            or os.environ.get("ProgramFiles")
+            or r"C:\Program Files (x86)"
+        )
         desktop = _desktop_folder(user)
         return cls(user, appdata, local, desktop, windows, program_data, public, program_files, program_files_x86)
 

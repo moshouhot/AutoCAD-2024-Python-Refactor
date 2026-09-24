@@ -323,16 +323,16 @@ def test_partial_retirement_failure_rolls_back_already_deleted_file(
     )
     adapter.apply_plan(plan)
 
-    real_unlink = Path.unlink
+    real_delete = rw._delete_owned_file_by_handle
 
-    def failing_unlink(self, *args, **kwargs):
-        if self == second:
-            raise OSError("simulated unlink failure")
-        return real_unlink(self, *args, **kwargs)
+    def failing_delete(path, expected_sha256):
+        if Path(path) == second:
+            raise OSError("simulated delete failure")
+        return real_delete(path, expected_sha256)
 
-    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    monkeypatch.setattr(rw, "_delete_owned_file_by_handle", failing_delete)
 
-    with pytest.raises(OSError, match="simulated unlink failure"):
+    with pytest.raises(OSError, match="simulated delete failure"):
         adapter.apply_plan(_no_file_plan(state_path))
 
     # Whichever file was deleted first is restored; nothing is lost.
@@ -401,4 +401,93 @@ def test_uninstall_genuinely_missing_owned_file_is_not_a_conflict(
 
     assert report.conflicts == ()
     assert report.files_removed == 0
+    assert not state_path.exists()
+
+
+# --- C: uninstall retains only unfinished work, not the original journal ----
+
+
+def test_uninstall_retains_only_conflicting_work_and_retry_completes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A conflict keeps only the unfinished entry; completed resources are pruned.
+
+    Registry value, shortcut and junction all roll back successfully while a
+    single archive file conflicts.  The retained state must therefore contain
+    only that file; after the user removes it, a second uninstall must finish
+    with no conflicts and delete the state file without manual journal edits.
+    """
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    state_path = tmp_path / "state.json"
+
+    key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\Retained"
+    memory.keys.add(key)
+    memory.set(key, "Setting", {"type": 1, "data": "portable"})
+
+    shortcut = tmp_path / "AutoCAD 2024.lnk"
+    shortcut.write_bytes(b"installed-shortcut")
+
+    junction_dir = tmp_path / "junction"
+    junction_dir.mkdir()
+
+    removable = tmp_path / "Apps64" / "removable.dll"
+    removable.parent.mkdir(parents=True)
+    removable.write_bytes(b"removable-v1")
+    conflict = tmp_path / "Apps64" / "conflict.dll"
+    conflict.write_bytes(b"conflict-v1")
+
+    state = rw._new_state()
+    state["status"] = "complete"
+    state["registry_values"][rw._registry_identity(key, "Setting")] = {
+        "before": {"type": 1, "data": "original"},
+        "installed": {"type": 1, "data": "portable"},
+    }
+    state["created_registry_keys"] = [key.rstrip("\\").casefold()]
+    state["shortcuts"][str(shortcut)] = {
+        "before_base64": None,
+        "installed_sha256": hashlib.sha256(b"installed-shortcut").hexdigest(),
+    }
+    state["created_junctions"][str(junction_dir)] = str(junction_dir)
+    state["created_files"][str(removable)] = {
+        "installed_sha256": hashlib.sha256(b"removable-v1").hexdigest(),
+    }
+    state["created_files"][str(conflict)] = {
+        "installed_sha256": hashlib.sha256(b"conflict-v1").hexdigest(),
+    }
+    rw._write_state(state_path, state)
+
+    # External writer changes the conflicting file after install.
+    conflict.write_bytes(b"external-change")
+
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    first = adapter.uninstall(state_path)
+
+    assert len(first.conflicts) == 1
+    assert "file changed externally" in first.conflicts[0]
+    assert first.registry_restored == 1
+    assert first.shortcuts_removed == 1
+    assert first.junctions_removed == 1
+    assert first.files_removed == 1
+    assert not removable.exists()
+    assert conflict.read_bytes() == b"external-change"
+    assert not junction_dir.exists()
+    assert memory.snapshot(key, "Setting")["data"] == "original"
+
+    retained = rw._load_state(state_path)
+    assert retained is not None
+    assert retained["status"] == "uninstall_conflicts"
+    # Completed work is gone from the retained journal; only the file remains.
+    assert retained["registry_values"] == {}
+    assert retained["shortcuts"] == {}
+    assert retained["created_junctions"] == {}
+    assert _entry(retained["created_files"], removable) is None
+    assert _entry(retained["created_files"], conflict) is not None
+
+    # The user resolves the only conflict by removing the external file.
+    conflict.unlink()
+
+    second = adapter.uninstall(state_path)
+
+    assert second.conflicts == ()
     assert not state_path.exists()

@@ -601,9 +601,9 @@ def test_parent_symlink_destination_is_refused(tmp_path: Path, monkeypatch) -> N
 
     assert not (real_parent / "runtime.dll").exists()
     assert not destination.exists()
-    state = rw._load_state(state_path)
-    assert state is not None
-    assert state["created_files"] == {}
+    # The reparse-parent conflict is caught by the pre-mutation destination
+    # preflight, so the state file is never created (zero-mutation failure).
+    assert not state_path.exists()
 
 
 def test_destination_symlink_is_refused(tmp_path: Path, monkeypatch) -> None:

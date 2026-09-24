@@ -316,7 +316,10 @@ class RealWindowsAdapter:
             if isinstance(operation, InstallArchiveFile):
                 archive_payloads[index] = _read_archive_member(operation)
 
-        state = _load_state(state_path) or _new_state()
+        prior_state = _load_state(state_path)
+        _preflight_archive_destinations(plan.operations, archive_payloads, prior_state)
+
+        state = prior_state or _new_state()
         state["status"] = "applying"
         state["install_payload"] = state_op.payload
         _write_state(state_path, state)
@@ -471,36 +474,32 @@ class RealWindowsAdapter:
             if _windows_path_key(path) in planned_destinations:
                 continue
             installed_sha = entry.get("installed_sha256")
-            # Reparse checks must come before existence/hashing: hashing a
-            # symlink follows its target, and deleting through a swapped-in
-            # parent would escape the intended tree.
-            if _is_reparse_or_symlink(path) or _has_reparse_ancestor(path):
+            # The helper performs the reparse check before opening, then binds
+            # read/hash/delete to a single Windows file handle under the parent
+            # directory lock.  A sharing/permission failure raises instead of
+            # being classified, so apply fails loudly rather than silently
+            # disowning a file that may still be ours.
+            result = _delete_owned_file_by_handle(path, installed_sha)
+            if result.outcome == "external":
+                action = (
+                    "released_reparse"
+                    if result.reason == "reparse"
+                    else "released_external"
+                )
                 retired[path_text] = {
-                    "action": "released_reparse",
+                    "action": action,
                     "installed_sha256": installed_sha,
                 }
                 del created[path_text]
                 continue
-            if not os.path.lexists(path):
+            if result.outcome == "missing":
                 retired[path_text] = {"action": "missing"}
                 del created[path_text]
                 continue
-            if not path.is_file() or _file_sha256(path) != installed_sha:
-                retired[path_text] = {
-                    "action": "released_external",
-                    "installed_sha256": installed_sha,
-                }
-                del created[path_text]
-                continue
-            payload = path.read_bytes()
-            rollback_journal.append((path, payload))
-            try:
-                path.unlink()
-            except Exception:
-                # The delete never happened, so drop the not-yet-actionable
-                # journal entry before the failure propagates.
-                rollback_journal.pop()
-                raise
+            # The file was deleted through the locked handle; keep its exact
+            # payload so a later failure can restore it and re-own it.
+            assert result.payload is not None
+            rollback_journal.append((path, result.payload))
             retired[path_text] = {
                 "action": "removed",
                 "installed_sha256": installed_sha,
@@ -523,13 +522,23 @@ class RealWindowsAdapter:
         for path_text, entry in reversed(list(state.get("created_files", {}).items())):
             path = Path(path_text)
             installed_sha = entry.get("installed_sha256")
-            if _is_reparse_or_symlink(path) or _has_reparse_ancestor(path):
+            try:
+                result = _delete_owned_file_by_handle(path, installed_sha)
+            except OSError as exc:
+                # Busy/permission/sharing failure: fail closed and keep
+                # ownership so a later retry can finish the job.
+                conflicts.append(f"installer-owned file could not be removed: {path}: {exc}")
+                continue
+            if result.outcome == "removed":
+                files_removed += 1
+            elif result.outcome == "missing":
+                # Genuinely missing: nothing to undo.  Ownership is dropped so
+                # a later uninstall does not keep retrying a nonexistent path.
+                pass
+            elif result.reason == "reparse":
                 conflicts.append(f"file is or is below a reparse point: {path}")
                 continue
-            if not os.path.lexists(path):
-                # Genuinely missing: nothing to undo, so this stays a no-op.
-                continue
-            if not path.is_file():
+            elif result.reason == "non-file":
                 # An existing non-file object (directory, device, ...) has
                 # replaced our installer-owned file.  Deleting it would
                 # destroy external data, so it is a conflict and the state
@@ -539,15 +548,16 @@ class RealWindowsAdapter:
                     f"{path}"
                 )
                 continue
-            current_sha = _file_sha256(path)
-            if current_sha != installed_sha:
+            else:
                 conflicts.append(f"file changed externally: {path}")
                 continue
-            path.unlink()
-            files_removed += 1
+            # Completed (removed or confirmed absent): drop the ownership
+            # entry so a later uninstall does not re-process it.
+            del state["created_files"][path_text]
 
         for identity, entry in reversed(list(state.get("registry_values", {}).items())):
             if entry.get("released"):
+                del state["registry_values"][identity]
                 continue
             key, name = identity.split("\u0000", 1)
             current = _query_registry_value(key, name)
@@ -562,6 +572,7 @@ class RealWindowsAdapter:
             else:
                 _set_registry_snapshot(key, name, before)
                 restored += 1
+            del state["registry_values"][identity]
 
         for path_text, entry in reversed(list(state.get("shortcuts", {}).items())):
             path = Path(path_text)
@@ -571,6 +582,7 @@ class RealWindowsAdapter:
                 # never reached a successful shortcut write. There is nothing
                 # to undo and restoring/deleting here could damage unrelated
                 # state.
+                del state["shortcuts"][path_text]
                 continue
             current_sha = _file_sha256(path) if path.is_file() else None
             if current_sha != installed_sha:
@@ -584,20 +596,27 @@ class RealWindowsAdapter:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(base64.b64decode(before_b64))
                 shortcut_restored += 1
+            del state["shortcuts"][path_text]
 
         for path_text, target_text in reversed(list(state.get("created_junctions", {}).items())):
             path = Path(path_text)
             target = Path(target_text)
             if not os.path.lexists(path):
+                del state["created_junctions"][path_text]
                 continue
             if not _same_path(path, target):
                 conflicts.append(f"junction changed externally: {path}")
                 continue
             os.rmdir(path)
             junction_removed += 1
+            del state["created_junctions"][path_text]
 
         for key in sorted(state.get("created_registry_keys", []), key=lambda item: item.count("\\"), reverse=True):
             _delete_registry_key_if_empty(key)
+            # Only prune an identity we can confirm is gone, so a stale
+            # non-empty external key is never dropped from the journal.
+            if not _registry_key_exists(key):
+                state["created_registry_keys"].remove(key)
 
         report = UninstallReport(
             registry_restored=restored,
@@ -935,6 +954,52 @@ def _classify_existing_archive(
     return "conflict", None
 
 
+def _preflight_archive_destinations(
+    operations: tuple[Operation, ...],
+    archive_payloads: dict[int, bytes],
+    prior_state: dict[str, Any] | None,
+) -> None:
+    """Fail archive destination conflicts before any install mutation.
+
+    Archive payloads have already been fully read/validated when this helper is
+    called.  This second, read-only gate checks the destinations against the
+    *pre-apply* ownership journal so a strict conflict, reparse path, or
+    non-regular target cannot be discovered only after the state file or an
+    earlier registry/junction/shortcut operation has been modified.
+
+    The normal ``_apply(InstallArchiveFile)`` checks remain authoritative at
+    mutation time; this is an early fail-fast gate, not a replacement for those
+    runtime re-checks.
+    """
+    created_files = (prior_state or {}).get("created_files", {})
+
+    for index, operation in enumerate(operations):
+        if not isinstance(operation, InstallArchiveFile):
+            continue
+
+        payload = archive_payloads[index]
+        wanted_sha = hashlib.sha256(payload).hexdigest()
+        destination = operation.destination
+
+        _reject_reparse_path(destination)
+        if not os.path.lexists(destination):
+            continue
+        if not destination.is_file():
+            raise RuntimeError(
+                f"file destination exists but is not a file: {destination}"
+            )
+
+        current_sha = _file_sha256(destination)
+        kind, _entry_key = _classify_existing_archive(
+            created_files, operation, current_sha, wanted_sha
+        )
+        if kind == "conflict":
+            raise RuntimeError(
+                "refusing to overwrite existing shared file with different content: "
+                f"{destination}"
+            )
+
+
 def inspect_install_state(path: Path) -> dict[str, Any]:
     """Return a compact, read-only status view for CLI/reporting."""
     if not path.is_file():
@@ -1247,6 +1312,13 @@ class _Filetime(ctypes.Structure):
     ]
 
 
+class _FileDispositionInfo(ctypes.Structure):
+    # FILE_DISPOSITION_INFO: a single BOOLEAN.  Passing a one-byte structure
+    # (rather than a lone ctypes boolean) keeps ``ctypes.sizeof`` honest for
+    # the ``dwBufferSize`` argument of SetFileInformationByHandle.
+    _fields_ = [("DeleteFile", ctypes.c_ubyte)]
+
+
 class _ByHandleFileInformation(ctypes.Structure):
     _fields_ = [
         ("dwFileAttributes", ctypes.c_uint32),
@@ -1273,6 +1345,15 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _INVALID_HANDLE_VALUE = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
+
+# Rights/flags used by the handle-bound owned-file deletion path.
+_GENERIC_READ = 0x80000000
+_DELETE = 0x00010000
+_ERROR_FILE_NOT_FOUND = 2
+_ERROR_PATH_NOT_FOUND = 3
+_ERROR_HANDLE_EOF = 38
+_FILE_DISPOSITION_INFO_CLASS = 4
+_HANDLE_READ_CHUNK = 1024 * 1024
 
 _KERNEL32: Any = None
 
@@ -1304,6 +1385,21 @@ def _get_kernel32():
         )
         kernel32.CloseHandle.restype = ctypes.c_int
         kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.ReadFile.restype = ctypes.c_int
+        kernel32.ReadFile.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_void_p,
+        )
+        kernel32.SetFileInformationByHandle.restype = ctypes.c_int
+        kernel32.SetFileInformationByHandle.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        )
         _KERNEL32 = kernel32
     return _KERNEL32
 
@@ -1429,6 +1525,168 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
                 os.unlink(temp_name)
             except OSError:
                 pass
+
+
+@dataclass(frozen=True)
+class OwnedFileDeletion:
+    """Outcome of a handle-bound owned-file deletion attempt.
+
+    ``outcome`` is one of ``removed`` (the file was deleted and ``payload``
+    holds the exact bytes that were read back through the locked handle),
+    ``missing`` (the path genuinely did not exist) or ``external`` (the path
+    is no longer safely ours and was left untouched; ``reason`` names why).
+    Operational failures (sharing/permission/metadata/read/disposition) are
+    raised as ``OSError`` instead of being classified, so callers fail closed
+    rather than silently releasing ownership of a busy file.
+    """
+
+    outcome: str
+    payload: bytes | None = None
+    reason: str | None = None
+
+
+def _read_all_from_handle(kernel32, handle: int) -> bytes:
+    """Read every byte of an open file handle, looping until a zero-byte read.
+
+    The loop (rather than a single read sized from the initial metadata) is
+    deliberate: it keeps reading to EOF and never trusts a size captured
+    before the handle was locked.
+    """
+    buffer = ctypes.create_string_buffer(_HANDLE_READ_CHUNK)
+    chunks: list[bytes] = []
+    while True:
+        read = ctypes.c_uint32(0)
+        ok = kernel32.ReadFile(
+            handle,
+            buffer,
+            _HANDLE_READ_CHUNK,
+            ctypes.byref(read),
+            None,
+        )
+        if not ok:
+            error = ctypes.get_last_error()
+            if error == _ERROR_HANDLE_EOF:
+                break
+            raise ctypes.WinError(error)
+        if read.value == 0:
+            break
+        chunks.append(buffer.raw[: read.value])
+    return b"".join(chunks)
+
+
+def _delete_owned_file_by_handle(
+    path: Path,
+    expected_sha256: str | None,
+) -> OwnedFileDeletion:
+    """Delete ``path`` only when it is still the exact file we installed.
+
+    On Windows this binds read/hash/delete to one file object instead of
+    re-opening the path: the parent directory chain is held against
+    rename/delete by ``_locked_parent_chain``, and the target is opened with
+    ``GENERIC_READ | DELETE | FILE_READ_ATTRIBUTES`` and a share mode of
+    ``FILE_SHARE_READ`` only (no ``FILE_SHARE_WRITE`` / ``FILE_SHARE_DELETE``).
+    That blocks a concurrent same-name replacement, rename or content edit
+    between the hash and the delete.  ``FILE_FLAG_OPEN_REPARSE_POINT`` keeps
+    the handle on the directory entry itself so a planted link is seen, not
+    followed.  The bytes are read through that same handle, and the delete is
+    requested with ``SetFileInformationByHandle(FileDispositionInfo)`` on the
+    same handle; the pathname is never reopened for hashing or deletion.
+
+    Non-Windows hosts keep the existing portable behaviour; that fallback
+    makes no Windows handle-level race guarantee.
+    """
+    if os.name != "nt":
+        return _delete_owned_file_portable(path, expected_sha256)
+
+    # Reparse classification stays ahead of opening so a swapped-in link is
+    # never opened, hashed or deleted through.
+    if _is_reparse_or_symlink(path) or _has_reparse_ancestor(path):
+        return OwnedFileDeletion("external", reason="reparse")
+
+    kernel32 = _get_kernel32()
+    # Acquire the parent-directory lock separately so that a genuinely absent
+    # parent chain is classified as ``missing`` while every failure *inside*
+    # the locked window (metadata, read, disposition) keeps propagating as an
+    # OSError for the caller to fail closed on.
+    lock = _locked_parent_chain(path)
+    try:
+        frozen = lock.__enter__()
+    except FileNotFoundError:
+        return OwnedFileDeletion("missing")
+    try:
+        handle = kernel32.CreateFileW(
+            str(frozen),
+            _GENERIC_READ | _DELETE | _FILE_READ_ATTRIBUTES,
+            _FILE_SHARE_READ,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if not handle or handle == _INVALID_HANDLE_VALUE:
+            error = ctypes.get_last_error()
+            if error in (_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND):
+                return OwnedFileDeletion("missing")
+            raise ctypes.WinError(error)
+        try:
+            info = _ByHandleFileInformation()
+            if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            attributes = info.dwFileAttributes
+            if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                return OwnedFileDeletion("external", reason="reparse")
+            if attributes & _FILE_ATTRIBUTE_DIRECTORY:
+                return OwnedFileDeletion("external", reason="non-file")
+            if expected_sha256 is None:
+                # A real regular file exists, but without a recorded installed
+                # hash ownership cannot be verified.  Fail closed before
+                # reading its contents; missing/non-file targets retain their
+                # stronger classifications above.
+                return OwnedFileDeletion("external", reason="no recorded hash")
+
+            payload = _read_all_from_handle(kernel32, handle)
+            current_sha = hashlib.sha256(payload).hexdigest()
+            if current_sha != expected_sha256:
+                return OwnedFileDeletion("external", reason="hash mismatch")
+
+            disposition = _FileDispositionInfo(1)
+            if not kernel32.SetFileInformationByHandle(
+                handle,
+                _FILE_DISPOSITION_INFO_CLASS,
+                ctypes.byref(disposition),
+                ctypes.sizeof(disposition),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return OwnedFileDeletion("removed", payload=payload)
+        finally:
+            kernel32.CloseHandle(handle)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _delete_owned_file_portable(
+    path: Path,
+    expected_sha256: str | None,
+) -> OwnedFileDeletion:
+    """Portable fallback for ``_delete_owned_file_by_handle`` (non-Windows).
+
+    Keeps the pre-existing reparse-before-hash, hash-then-unlink ordering.
+    Unlike the Windows path it cannot bind the hash to the delete, so it is
+    only used where no Windows handle-level guarantee is available.
+    """
+    if _is_reparse_or_symlink(path) or _has_reparse_ancestor(path):
+        return OwnedFileDeletion("external", reason="reparse")
+    if not os.path.lexists(path):
+        return OwnedFileDeletion("missing")
+    if not path.is_file():
+        return OwnedFileDeletion("external", reason="non-file")
+    if expected_sha256 is None:
+        return OwnedFileDeletion("external", reason="no recorded hash")
+    payload = path.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        return OwnedFileDeletion("external", reason="hash mismatch")
+    path.unlink()
+    return OwnedFileDeletion("removed", payload=payload)
 
 
 def _is_reparse_or_symlink(path: Path) -> bool:

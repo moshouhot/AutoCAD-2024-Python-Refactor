@@ -737,11 +737,9 @@ def test_archive_file_install_refuses_dangling_destination_reparse_point_without
     assert not real_lexists(destination)
     assert not destination.exists()
     assert not destination.parent.exists()
-    state = rw._load_state(state_path)
-    assert state is not None
-    assert state["created_files"] == {}
-    assert rw._find_file_entry(state["created_files"], destination) is None
-    assert state["status"] == "failed"
+    # The destination preflight runs before the state file is written, so a
+    # refused destination is a zero-mutation failure: no state file at all.
+    assert not state_path.exists()
 
 
 def test_archive_file_install_reuses_different_preexisting_shared_file_when_allowed(
