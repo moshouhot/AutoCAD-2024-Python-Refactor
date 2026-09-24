@@ -9,36 +9,92 @@ from acad_portable.ops import EnsureRegistryKey, SetRegistryValue, WriteInstallS
 from acad_portable.planner import InstallPlan
 
 
+class _CaseInsensitiveValueMap(dict):
+    """dict keyed by (key, name) tuples with Windows case-insensitive semantics."""
+
+    @staticmethod
+    def _norm(key: tuple[str, str]) -> tuple[str, str]:
+        registry_key, name = key
+        return (registry_key.rstrip("\\").casefold(), name.casefold())
+
+    def __getitem__(self, key):
+        return super().__getitem__(self._norm(key))
+
+    def __setitem__(self, key, value):
+        super().__setitem__(self._norm(key), value)
+
+    def __contains__(self, key) -> bool:
+        return super().__contains__(self._norm(key))
+
+    def get(self, key, default=None):
+        return super().get(self._norm(key), default)
+
+    def pop(self, key, default=None):
+        return super().pop(self._norm(key), default)
+
+
+class _CaseInsensitiveSet(set):
+    """set of registry key paths with Windows case-insensitive semantics."""
+
+    @staticmethod
+    def _norm(key: str) -> str:
+        return key.rstrip("\\").casefold()
+
+    def add(self, key: str) -> None:
+        super().add(self._norm(key))
+
+    def __contains__(self, key) -> bool:
+        return super().__contains__(self._norm(key))
+
+    def remove(self, key: str) -> None:
+        super().remove(self._norm(key))
+
+
 class RegistryMemory:
+    """In-memory registry that mirrors Windows case-insensitive key/value names."""
+
     def __init__(self) -> None:
-        self.keys: set[str] = set()
-        self.values: dict[tuple[str, str], dict[str, object]] = {}
+        self.keys: set[str] = _CaseInsensitiveSet()
+        self.values: dict[tuple[str, str], dict[str, object]] = _CaseInsensitiveValueMap()
 
     def snapshot(self, key: str, name: str):
         value = self.values.get((key, name))
         return deepcopy(value) if value is not None else None
 
+    def set(self, key: str, name: str, snapshot: dict[str, object]) -> None:
+        self.values[(key, name)] = deepcopy(snapshot)
+
+    def drop(self, key: str, name: str) -> None:
+        self.values.pop((key, name), None)
+
+    def has_key(self, key: str) -> bool:
+        return key in self.keys
+
+    def add_key(self, key: str) -> None:
+        self.keys.add(key)
+
 
 def patch_registry_backend(monkeypatch, memory: RegistryMemory) -> None:
-    monkeypatch.setattr(rw, "_registry_key_exists", lambda key: key in memory.keys)
-    monkeypatch.setattr(rw, "_ensure_registry_key", lambda key: memory.keys.add(key))
+    monkeypatch.setattr(rw, "_registry_key_exists", memory.has_key)
+    monkeypatch.setattr(rw, "_ensure_registry_key", memory.add_key)
     monkeypatch.setattr(rw, "_query_registry_value", memory.snapshot)
 
     def set_value(operation: SetRegistryValue) -> None:
-        memory.keys.add(operation.key)
+        memory.add_key(operation.key)
         kind = {"sz": 1, "expand_sz": 2, "dword": 4, "multi_sz": 7}[operation.kind]
-        memory.values[(operation.key, operation.name)] = {
-            "type": kind,
-            "data": deepcopy(operation.data),
-        }
+        memory.set(
+            operation.key,
+            operation.name,
+            {"type": kind, "data": deepcopy(operation.data)},
+        )
 
     monkeypatch.setattr(rw, "_set_registry_value", set_value)
     monkeypatch.setattr(
         rw,
         "_set_registry_snapshot",
-        lambda key, name, snapshot: memory.values.__setitem__((key, name), deepcopy(snapshot)),
+        lambda key, name, snapshot: memory.set(key, name, snapshot),
     )
-    monkeypatch.setattr(rw, "_delete_registry_value", lambda key, name: memory.values.pop((key, name), None))
+    monkeypatch.setattr(rw, "_delete_registry_value", memory.drop)
     monkeypatch.setattr(rw, "_delete_registry_key_if_empty", lambda key: None)
 
 
@@ -69,7 +125,7 @@ def test_journal_preserves_original_state_across_repeat_install(tmp_path: Path, 
     adapter.apply_plan(plan)
     second_state = rw._load_state(state_path)
 
-    identity = f"{key}\u0000AcadLocation"
+    identity = rw._registry_identity(key, "AcadLocation")
     assert first_state is not None and second_state is not None
     assert first_state["registry_values"][identity]["before"]["data"] == r"D:\Original"
     assert second_state["registry_values"][identity]["before"]["data"] == r"D:\Original"
@@ -104,7 +160,7 @@ def test_first_install_preserves_preexisting_shared_registry_value(
     adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
     adapter.apply_plan(plan)
 
-    identity = f"{key}\u0000Setting"
+    identity = rw._registry_identity(key, "Setting")
     state = rw._load_state(state_path)
     assert state is not None
     assert identity not in state["registry_values"]
@@ -142,7 +198,7 @@ def test_first_install_owns_missing_preserve_existing_registry_value(
     adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
     adapter.apply_plan(plan)
 
-    identity = f"{key}\u0000Setting"
+    identity = rw._registry_identity(key, "Setting")
     state = rw._load_state(state_path)
     assert state is not None
     assert state["registry_values"][identity]["before"] is None
@@ -184,7 +240,7 @@ def test_upgrade_releases_registry_value_changed_externally(tmp_path: Path, monk
     adapter.apply_plan(second)
     adapter.apply_plan(second)
 
-    identity = f"{key}\u0000Setting"
+    identity = rw._registry_identity(key, "Setting")
     state = rw._load_state(state_path)
     assert state is not None
     assert state["registry_values"][identity]["released"] is True
@@ -214,7 +270,7 @@ def test_upgrade_updates_registry_value_when_still_installer_owned(tmp_path: Pat
         warnings=(), metadata={},
     ))
 
-    identity = f"{key}\u0000Setting"
+    identity = rw._registry_identity(key, "Setting")
     state = rw._load_state(state_path)
     assert state is not None
     assert state["registry_values"][identity]["before"]["data"] == "before"
@@ -252,7 +308,7 @@ def test_upgrade_removes_stale_owned_registry_value_dropped_from_new_plan(
     adapter.apply_plan(first)
     adapter.apply_plan(second)
 
-    stale_identity = f"{key}\u0000Drop"
+    stale_identity = rw._registry_identity(key, "Drop")
     state = rw._load_state(state_path)
     assert state is not None
     assert (key, "Drop") not in memory.values
@@ -285,7 +341,7 @@ def test_upgrade_restores_stale_owned_registry_value_to_original(
         warnings=(), metadata={},
     ))
 
-    identity = f"{key}\u0000Setting"
+    identity = rw._registry_identity(key, "Setting")
     state = rw._load_state(state_path)
     assert state is not None
     assert memory.values[(key, "Setting")]["data"] == "original"
@@ -316,7 +372,7 @@ def test_upgrade_preserves_external_change_when_stale_value_is_dropped(
         warnings=(), metadata={},
     ))
 
-    identity = f"{key}\u0000Setting"
+    identity = rw._registry_identity(key, "Setting")
     state = rw._load_state(state_path)
     assert state is not None
     assert memory.values[(key, "Setting")]["data"] == "external"
@@ -495,7 +551,7 @@ def test_archive_file_install_creates_and_owned_uninstall_removes(tmp_path: Path
     assert destination.read_bytes() == b"runtime-v1"
     state = rw._load_state(state_path)
     assert state is not None
-    assert str(destination) in state["created_files"]
+    assert rw._find_file_entry(state["created_files"], destination) is not None
 
     report = adapter.uninstall(state_path)
     assert report.conflicts == ()
@@ -626,7 +682,7 @@ def test_archive_file_install_refuses_dangling_destination_reparse_point_without
     state = rw._load_state(state_path)
     assert state is not None
     assert state["created_files"] == {}
-    assert str(destination) not in state["created_files"]
+    assert rw._find_file_entry(state["created_files"], destination) is None
     assert state["status"] == "failed"
 
 

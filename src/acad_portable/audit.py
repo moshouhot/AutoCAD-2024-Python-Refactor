@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,11 +46,14 @@ class PlanFinding:
 def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFinding, ...]:
     findings: list[PlanFinding] = []
     vba_enabled = bool(plan.metadata.get("vba_enabled", False))
+    # Path identity is computed with ntpath and casefold so it stays valid when
+    # the audit runs on Linux against Windows-style plan data.
     planned_files = {
-        operation.destination.resolve(strict=False)
+        _windows_path_key(operation.destination)
         for operation in plan.operations
         if isinstance(operation, InstallArchiveFile)
     }
+    program_files_roots = _vba_allowed_file_roots(plan)
     allowed_roots = (
         HKCU_AUTOCAD.casefold(),
         HKLM_AUTOCAD.casefold(),
@@ -147,8 +151,7 @@ def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFi
             if operation.archive != layout.vba_archive:
                 findings.append(PlanFinding("VBA_ARCHIVE", str(operation.archive)))
             _check_no_system_target(findings, operation.destination, "VBA_FILE_SYSTEM")
-            lowered = str(operation.destination).replace("/", "\\").casefold()
-            if "\\program files\\" not in lowered and "\\program files (x86)\\" not in lowered:
+            if not _destination_within_vba_root(operation, program_files_roots):
                 findings.append(PlanFinding("VBA_FILE_ROOT", str(operation.destination)))
             member_cf = operation.member.replace("\\", "/").casefold()
             if member_cf.startswith("windows/") or "/fm20" in member_cf:
@@ -293,20 +296,73 @@ def _check_no_system_target(findings: list[PlanFinding], path: Path, code: str) 
         findings.append(PlanFinding(code, str(path)))
 
 
+def _windows_path_key(path: Path | str) -> str:
+    """Host-independent, separator- and case-insensitive path identity.
+
+    ``ntpath`` understands Windows drive/UNC semantics regardless of the OS
+    running the audit, so ``C:\\Program Files\\...`` is never mistaken for a
+    relative POSIX path.  ``normpath`` also collapses ``..`` segments before
+    containment is evaluated.
+    """
+    return ntpath.normpath(str(path).replace("/", "\\")).casefold()
+
+
+def _vba_allowed_file_roots(plan: InstallPlan) -> dict[str, str | None]:
+    """Map each supported archive member prefix to its configured root."""
+    program_files = plan.metadata.get("program_files")
+    program_files_x86 = plan.metadata.get("program_files_x86")
+    return {
+        "Program Files/": str(program_files) if program_files else None,
+        "Program Files (x86)/": (
+            str(program_files_x86) if program_files_x86 else None
+        ),
+    }
+
+
+def _is_within_root(path: Path | str, root: Path | str) -> bool:
+    """Lexical, component-boundary containment using Windows path semantics."""
+    candidate = _windows_path_key(path)
+    root_key = _windows_path_key(root)
+    return candidate == root_key or candidate.startswith(root_key + "\\")
+
+
+def _destination_within_vba_root(
+    operation: InstallArchiveFile,
+    roots: dict[str, str | None],
+) -> bool:
+    member = operation.member.replace("\\", "/")
+    expected_root: str | None = None
+    for prefix, configured in roots.items():
+        if member.startswith(prefix):
+            expected_root = configured
+            break
+    if expected_root is None:
+        # Unsupported member prefix: fail closed rather than guessing a root.
+        return False
+    return _is_within_root(operation.destination, expected_root)
+
+
 def _check_loader(
     findings: list[PlanFinding],
     loader: str,
     layout: PackageLayout,
-    planned_files: set[Path] | None = None,
+    planned_files: set[str] | None = None,
 ) -> None:
     if "://" in loader:
         return
-    candidate = Path(loader)
-    if not candidate.is_absolute():
+    # Windows absolute detection uses Windows semantics so a drive path is
+    # never appended to the (possibly POSIX) autocad_root on a Linux CI host.
+    # The native candidate is still built from the original loader string so
+    # that a real POSIX absolute path is checked with native existence and is
+    # not turned into a backslash filename that cannot exist.
+    windows_text = loader.replace("/", "\\")
+    if ntpath.isabs(windows_text) or ntpath.splitdrive(windows_text)[0]:
+        candidate = Path(loader)
+    else:
         candidate = layout.autocad_root / loader
     if candidate.exists():
         return
-    if planned_files and candidate.resolve(strict=False) in planned_files:
+    if planned_files and _windows_path_key(candidate) in planned_files:
         return
     findings.append(PlanFinding("LOADER_MISSING", str(candidate)))
 

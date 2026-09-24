@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import ntpath
 import os
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -60,6 +62,7 @@ class LiveDiffReport:
     file_create: int
     file_conflict: int
     details: tuple[str, ...]
+    file_upgrade: int = 0
 
 
 def inspect_live_diff(
@@ -85,11 +88,13 @@ def inspect_live_diff(
     file_reuse = 0
     file_create = 0
     file_conflict = 0
+    file_upgrade = 0
     details: list[str] = []
 
     state_op = next((op for op in plan.operations if isinstance(op, WriteInstallState)), None)
     prior_state = _load_state(state_op.path) if state_op is not None else None
     prior_values = (prior_state or {}).get("registry_values", {})
+    prior_files = (prior_state or {}).get("created_files", {})
 
     for operation in plan.operations:
         if isinstance(operation, EnsureRegistryKey):
@@ -99,7 +104,7 @@ def inspect_live_diff(
 
         if isinstance(operation, SetRegistryValue):
             current = _query_registry_value(operation.key, operation.name)
-            identity = f"{operation.key}\u0000{operation.name}"
+            identity = _registry_identity(operation.key, operation.name)
             prior_entry = prior_values.get(identity)
             wanted = {
                 "type": _registry_kind(operation.kind),
@@ -155,18 +160,43 @@ def inspect_live_diff(
         if isinstance(operation, InstallArchiveFile):
             payload = _read_archive_member(operation)
             wanted_sha = hashlib.sha256(payload).hexdigest()
-            if not operation.destination.exists():
-                file_create += 1
-            elif operation.destination.is_file() and _file_sha256(operation.destination) == wanted_sha:
-                file_same += 1
-            elif operation.destination.is_file() and operation.reuse_existing:
-                file_reuse += 1
-                if len(details) < 100:
-                    details.append(f"FILE_REUSE_EXISTING {operation.destination}")
-            else:
+            # Reparse/symlink destinations and parents are conflicts, checked
+            # before any existence or hash classification.  A symlink to an
+            # existing file would otherwise be misread as same/reuse/upgrade,
+            # and a dangling one would be misread as a create.
+            if _is_reparse_or_symlink(operation.destination) or _has_reparse_ancestor(
+                operation.destination
+            ):
                 file_conflict += 1
                 if len(details) < 100:
-                    details.append(f"FILE_CONFLICT {operation.destination}")
+                    details.append(
+                        f"FILE_CONFLICT {operation.destination} (reparse point)"
+                    )
+            elif not os.path.lexists(operation.destination):
+                file_create += 1
+            elif not operation.destination.is_file():
+                file_conflict += 1
+                if len(details) < 100:
+                    details.append(f"FILE_CONFLICT {operation.destination} (not a regular file)")
+            else:
+                current_sha = _file_sha256(operation.destination)
+                kind, _entry_key = _classify_existing_archive(
+                    prior_files, operation, current_sha, wanted_sha
+                )
+                if kind == "same":
+                    file_same += 1
+                elif kind == "upgrade":
+                    file_upgrade += 1
+                    if len(details) < 100:
+                        details.append(f"FILE_UPGRADE {operation.destination}")
+                elif kind == "reuse":
+                    file_reuse += 1
+                    if len(details) < 100:
+                        details.append(f"FILE_REUSE_EXISTING {operation.destination}")
+                else:
+                    file_conflict += 1
+                    if len(details) < 100:
+                        details.append(f"FILE_CONFLICT {operation.destination}")
 
     return LiveDiffReport(
         registry_same=registry_same,
@@ -184,6 +214,7 @@ def inspect_live_diff(
         file_create=file_create,
         file_conflict=file_conflict,
         details=tuple(details),
+        file_upgrade=file_upgrade,
     )
 
 
@@ -211,6 +242,7 @@ class RealWindowsAdapter:
                 self._apply(operation, state)
                 applied += 1
             self._reconcile_retired_registry_ownership(plan, state)
+            self._reconcile_retired_file_ownership(plan, state)
             state["status"] = "complete"
             _write_state(state_path, state)
         except Exception:
@@ -234,12 +266,12 @@ class RealWindowsAdapter:
         released and the external value is preserved.
         """
         planned_value_ids = {
-            f"{operation.key}\u0000{operation.name}"
+            _registry_identity(operation.key, operation.name)
             for operation in plan.operations
             if isinstance(operation, SetRegistryValue)
         }
         planned_keys = {
-            operation.key
+            operation.key.rstrip("\\").casefold()
             for operation in plan.operations
             if isinstance(operation, (EnsureRegistryKey, SetRegistryValue))
         }
@@ -277,13 +309,70 @@ class RealWindowsAdapter:
 
         created_keys = state.setdefault("created_registry_keys", [])
         for key in sorted(
-            [item for item in created_keys if item not in planned_keys],
+            [
+                item
+                for item in created_keys
+                if item.rstrip("\\").casefold() not in planned_keys
+            ],
             key=lambda item: item.count("\\"),
             reverse=True,
         ):
             _delete_registry_key_if_empty(key)
             if not _registry_key_exists(key):
                 created_keys.remove(key)
+
+    def _reconcile_retired_file_ownership(
+        self,
+        plan: InstallPlan,
+        state: dict[str, Any],
+    ) -> None:
+        """Release installer-owned archive files that left the upgraded plan.
+
+        Only files recorded in our journal are eligible.  A file that still
+        matches the hash we installed is deleted and ownership is dropped; a
+        file that is missing or was changed externally is left in place and
+        ownership is released.  Retired entries are recorded under
+        ``retired_files`` so a later uninstall never touches them again.
+        """
+        planned_destinations = {
+            _windows_path_key(operation.destination)
+            for operation in plan.operations
+            if isinstance(operation, InstallArchiveFile)
+        }
+        created = state.setdefault("created_files", {})
+        retired = state.setdefault("retired_files", {})
+        for path_text, entry in list(created.items()):
+            path = Path(path_text)
+            if _windows_path_key(path) in planned_destinations:
+                continue
+            installed_sha = entry.get("installed_sha256")
+            # Reparse checks must come before existence/hashing: hashing a
+            # symlink follows its target, and deleting through a swapped-in
+            # parent would escape the intended tree.
+            if _is_reparse_or_symlink(path) or _has_reparse_ancestor(path):
+                retired[path_text] = {
+                    "action": "released_reparse",
+                    "installed_sha256": installed_sha,
+                }
+                del created[path_text]
+                continue
+            if not os.path.lexists(path):
+                retired[path_text] = {"action": "missing"}
+                del created[path_text]
+                continue
+            if not path.is_file() or _file_sha256(path) != installed_sha:
+                retired[path_text] = {
+                    "action": "released_external",
+                    "installed_sha256": installed_sha,
+                }
+                del created[path_text]
+                continue
+            path.unlink()
+            retired[path_text] = {
+                "action": "removed",
+                "installed_sha256": installed_sha,
+            }
+            del created[path_text]
 
     def uninstall(self, state_path: Path) -> UninstallReport:
         state = _load_state(state_path)
@@ -301,6 +390,9 @@ class RealWindowsAdapter:
         for path_text, entry in reversed(list(state.get("created_files", {}).items())):
             path = Path(path_text)
             installed_sha = entry.get("installed_sha256")
+            if _is_reparse_or_symlink(path) or _has_reparse_ancestor(path):
+                conflicts.append(f"file is or is below a reparse point: {path}")
+                continue
             current_sha = _file_sha256(path) if path.is_file() else None
             if current_sha is None:
                 continue
@@ -382,15 +474,16 @@ class RealWindowsAdapter:
 
     def _apply(self, operation: Operation, state: dict[str, Any]) -> None:
         if isinstance(operation, EnsureRegistryKey):
+            canonical_key = operation.key.rstrip("\\").casefold()
             if not _registry_key_exists(operation.key):
                 created = state.setdefault("created_registry_keys", [])
-                if operation.key not in created:
-                    created.append(operation.key)
+                if canonical_key not in created:
+                    created.append(canonical_key)
             _ensure_registry_key(operation.key)
             return
 
         if isinstance(operation, SetRegistryValue):
-            identity = f"{operation.key}\u0000{operation.name}"
+            identity = _registry_identity(operation.key, operation.name)
             values = state.setdefault("registry_values", {})
             current = _query_registry_value(operation.key, operation.name)
             if current is not None and _registry_operation_matches_snapshot(operation, current):
@@ -446,6 +539,7 @@ class RealWindowsAdapter:
         if isinstance(operation, InstallArchiveFile):
             payload = _read_archive_member(operation)
             wanted_sha = hashlib.sha256(payload).hexdigest()
+            created = state.setdefault("created_files", {})
             # lexists() is the single existence gate: it is True for dangling
             # symlinks and other reparse points whose target is missing, which
             # exists() reports as absent.  A present-but-not-regular-file
@@ -453,26 +547,68 @@ class RealWindowsAdapter:
             # path below is reachable only when lexists reports the
             # destination absent.
             if os.path.lexists(operation.destination):
-                if operation.destination.is_file():
-                    current_sha = _file_sha256(operation.destination)
-                    if current_sha == wanted_sha:
-                        return
-                    if operation.reuse_existing:
-                        return
+                _reject_reparse_path(operation.destination)
+                if not operation.destination.is_file():
                     raise RuntimeError(
-                        "refusing to overwrite existing shared file with different content: "
-                        f"{operation.destination}"
+                        f"file destination exists but is not a file: {operation.destination}"
                     )
-                raise RuntimeError(
-                    f"file destination exists but is not a file: {operation.destination}"
+                current_sha = _file_sha256(operation.destination)
+                kind, entry_key = _classify_existing_archive(
+                    created, operation, current_sha, wanted_sha
                 )
+                if kind == "same":
+                    return
+                if kind == "upgrade":
+                    # Installer-owned and unchanged: a safe upgrade.  The
+                    # previous ownership entry stays intact until the new bytes
+                    # are atomically in place, so a failed write cannot lose it.
+                    assert entry_key is not None
+                    pending = dict(created[entry_key])
+                    pending.update(
+                        {
+                            "installed_sha256": wanted_sha,
+                            "archive": str(operation.archive),
+                            "member": operation.member,
+                        }
+                    )
+                    state.setdefault("pending_files", {})[entry_key] = pending
+                    _atomic_write_bytes(operation.destination, payload)
+                    created[entry_key] = pending
+                    state.get("pending_files", {}).pop(entry_key, None)
+                    return
+                if kind == "reuse":
+                    # Journaled but changed externally, or unowned: preserve the
+                    # existing bytes.  If it was ours, release ownership rather
+                    # than silently adopting the external file.
+                    if entry_key is not None:
+                        retired = state.setdefault("retired_files", {})
+                        retired[entry_key] = {
+                            "action": "released_external",
+                            "installed_sha256": created[entry_key].get(
+                                "installed_sha256"
+                            ),
+                        }
+                        del created[entry_key]
+                    return
+                raise RuntimeError(
+                    "refusing to overwrite existing shared file with different content: "
+                    f"{operation.destination}"
+                )
+            _reject_reparse_path(operation.destination)
             operation.destination.parent.mkdir(parents=True, exist_ok=True)
-            operation.destination.write_bytes(payload)
-            state.setdefault("created_files", {})[str(operation.destination)] = {
+            _reject_reparse_path(operation.destination)
+            entry_key = str(operation.destination)
+            pending = {
                 "installed_sha256": wanted_sha,
                 "archive": str(operation.archive),
                 "member": operation.member,
             }
+            # Record intent in memory before the destination is exposed so the
+            # apply_plan failure handler can persist a diagnosable journal.
+            state.setdefault("pending_files", {})[entry_key] = pending
+            _atomic_write_bytes(operation.destination, payload)
+            created[entry_key] = pending
+            state.get("pending_files", {}).pop(entry_key, None)
             return
 
         raise TypeError(f"unsupported operation: {type(operation).__name__}")
@@ -484,10 +620,35 @@ def _new_state() -> dict[str, Any]:
         "status": "new",
         "created_registry_keys": [],
         "registry_values": {},
+        "retired_registry_values": {},
         "created_junctions": {},
         "created_files": {},
+        "retired_files": {},
+        "pending_files": {},
         "shortcuts": {},
     }
+
+
+def _registry_identity(key: str, name: str) -> str:
+    """Canonical, case-insensitive identity for a registry value.
+
+    Windows registry key and value names are case-insensitive, so the journal
+    must use a single normalized identity everywhere it compares or looks up
+    an entry.  The raw spelling is intentionally not preserved here: the
+    journal only ever needs the canonical form.
+    """
+    return f"{key.rstrip(chr(92)).casefold()}\u0000{name.casefold()}"
+
+
+def _windows_path_key(path: Path | str) -> str:
+    """Stable, host-independent identity for a Windows-style path.
+
+    ``/`` and ``\\`` are equivalent separators and Windows paths are
+    case-insensitive, so both are folded here.  This deliberately avoids
+    ``Path.resolve()``/``Path.is_absolute()``: those follow the *host* OS
+    semantics and would misclassify ``C:\\Program Files\\...`` on POSIX.
+    """
+    return ntpath.normpath(str(path).replace("/", "\\")).casefold()
 
 
 def _load_state(path: Path) -> dict[str, Any] | None:
@@ -496,7 +657,98 @@ def _load_state(path: Path) -> dict[str, Any] | None:
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("schema") != STATE_SCHEMA:
         raise RuntimeError(f"unsupported state schema: {data.get('schema')}")
+    _normalize_state_identity(data)
     return data
+
+
+def _normalize_state_identity(state: dict[str, Any]) -> None:
+    """Migrate schema-1 journals whose identity keys are not canonical.
+
+    Older journals stored the raw ``key\u0000name`` spelling.  Every map that
+    keys on registry identity or on Windows file path identity is rewritten to
+    the canonical form so apply / diff / reconcile / uninstall all agree.
+    A collision after casefolding means two distinct entries collapse onto one
+    identity; that is ambiguous, so the journal is rejected rather than
+    silently dropping one of them.
+    """
+    for section in ("registry_values", "retired_registry_values"):
+        mapping = state.get(section)
+        if not isinstance(mapping, dict):
+            continue
+        normalized: dict[str, Any] = {}
+        for identity, entry in mapping.items():
+            if "\u0000" not in identity:
+                raise RuntimeError(f"invalid registry identity in journal: {identity!r}")
+            key, name = identity.split("\u0000", 1)
+            canonical = _registry_identity(key, name)
+            if canonical in normalized:
+                raise RuntimeError(
+                    "ambiguous registry identity after case folding: "
+                    f"{identity!r} conflicts with an existing journal entry"
+                )
+            normalized[canonical] = entry
+        state[section] = normalized
+
+    created_keys = state.get("created_registry_keys")
+    if isinstance(created_keys, list):
+        canonical_keys: list[str] = []
+        for key in created_keys:
+            canonical = key.rstrip("\\").casefold()
+            if canonical not in canonical_keys:
+                canonical_keys.append(canonical)
+        state["created_registry_keys"] = canonical_keys
+
+    # File maps deliberately keep their raw filesystem path keys: those keys
+    # are used to open/delete real files, and canonical Windows spelling is
+    # not a valid POSIX path.  Ownership lookups go through
+    # ``_windows_path_key`` instead, which is host-independent.
+
+
+def _find_file_entry_key(mapping: dict[str, Any], path: Path | str) -> str | None:
+    canonical = _windows_path_key(path)
+    for key in mapping:
+        if _windows_path_key(key) == canonical:
+            return key
+    return None
+
+
+def _find_file_entry(mapping: dict[str, Any], path: Path | str) -> Any | None:
+    key = _find_file_entry_key(mapping, path)
+    return mapping[key] if key is not None else None
+
+
+def _classify_existing_archive(
+    journal: dict[str, Any],
+    operation: InstallArchiveFile,
+    current_sha: str | None,
+    wanted_sha: str,
+) -> tuple[str, str | None]:
+    """Classify an existing regular-file destination the same way apply does.
+
+    Returns ``(kind, entry_key)`` where ``kind`` is one of ``same``,
+    ``upgrade``, ``reuse`` or ``conflict``.  ``inspect_live_diff`` and
+    ``_apply`` both route through this so a diff can never disagree with what
+    apply would do.  Ownership is decided by the journaled installed hash, not
+    by the wanted hash: external bytes that happen to match the new payload are
+    still an external change, not a silent adoption.
+    """
+    entry_key = _find_file_entry_key(journal, operation.destination)
+    if entry_key is not None:
+        installed_sha = journal[entry_key].get("installed_sha256")
+        if installed_sha is not None and current_sha == installed_sha:
+            # Still installer-owned and unchanged.  Identical payload is a
+            # no-op; a different payload is a safe upgrade.
+            return ("same" if current_sha == wanted_sha else "upgrade"), entry_key
+        # Journaled but changed externally (even if the external bytes happen
+        # to equal the new payload): never silently adopted.
+        if operation.reuse_existing:
+            return "reuse", entry_key
+        return "conflict", entry_key
+    if current_sha == wanted_sha:
+        return "same", None
+    if operation.reuse_existing:
+        return "reuse", None
+    return "conflict", None
 
 
 def inspect_install_state(path: Path) -> dict[str, Any]:
@@ -771,6 +1023,86 @@ def _create_shortcut(operation: CreateShortcut) -> None:
     if result.returncode != 0 or not operation.path.is_file():
         raise RuntimeError(
             f"shortcut creation failed ({result.returncode}): {result.stdout} {result.stderr}".strip()
+        )
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Expose ``payload`` at ``path`` atomically, never leaving a partial file.
+
+    The bytes are written to a sibling temp file in the same directory, flushed
+    and fsynced, then moved into place with ``os.replace``.  A failure at any
+    point removes the temp file, so the destination is either untouched or
+    complete; it is never truncated.  The reparse guard is re-checked
+    immediately before the replace so a parent swapped in after the caller's
+    check cannot silently redirect the rename.  This closes the partial-write
+    failure window but does not claim to be crash-transactional.
+    """
+    fd, temp_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _reject_reparse_path(path)
+        os.replace(temp_name, path)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+
+
+def _is_reparse_or_symlink(path: Path) -> bool:
+    """True when ``path`` exists and is a symlink or Windows reparse point.
+
+    Uses ``lstat`` so the check sees the link itself rather than its target.
+    ``st_file_attributes`` is only present on Windows, which keeps this
+    working on Python 3.11 while remaining a no-op on POSIX.
+    """
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Fail closed: an unreadable path must not be treated as safe.
+        return True
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _iter_ancestors(path: Path):
+    """Yield every ancestor of ``path`` from its parent up to the filesystem root."""
+    current = path.parent
+    while True:
+        yield current
+        parent = current.parent
+        if parent == current:
+            return
+        current = parent
+
+
+def _has_reparse_ancestor(path: Path) -> bool:
+    return any(_is_reparse_or_symlink(ancestor) for ancestor in _iter_ancestors(path))
+
+
+def _reject_reparse_path(path: Path) -> None:
+    """Refuse to create/write ``path`` through a symlink or reparse point.
+
+    Both the destination itself and every already-existing parent component
+    are checked.  Without the ancestor check an attacker who can plant a
+    symlink/junction in a parent directory could redirect our mkdir/write/
+    replace outside the planned tree.  A concurrent swap between this check
+    and the write remains possible and is explicitly out of scope.
+    """
+    if _is_reparse_or_symlink(path):
+        raise RuntimeError(f"refusing to write through a reparse point: {path}")
+    if _has_reparse_ancestor(path):
+        raise RuntimeError(
+            f"refusing to write below a reparse point in a parent directory: {path}"
         )
 
 

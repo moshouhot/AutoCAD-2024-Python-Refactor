@@ -308,6 +308,12 @@ class InstallPlanner:
                 "desktop_shortcut": config.enabled("桌面快捷方式", default=True),
                 "desktop": str(self.folders.desktop),
                 "vba_enabled": vba_enabled,
+                # Explicit allowed file roots for the VBA payload.  The audit
+                # validates destinations against these instead of hard-coding
+                # the literal "Program Files" directory names, so relocated or
+                # renamed program-files folders stay valid.
+                "program_files": str(self.folders.program_files),
+                "program_files_x86": str(self.folders.program_files_x86),
             },
         )
 

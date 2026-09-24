@@ -537,3 +537,24 @@ def test_vba_base_plan_includes_minimal_msi_identity_and_excludes_untraced_insta
     assert all(op.preserve_existing for op in msi_values)
     assert validate_core_plan(plan, layout) == ()
 
+
+
+def test_planner_publishes_configured_program_files_roots(tmp_path: Path) -> None:
+    """The audit relies on these metadata roots instead of literal names."""
+    layout = make_package(tmp_path)
+    folders = KnownFolders(
+        user_profile=Path(r"C:\Users\Tester"),
+        appdata=Path(r"C:\Users\Tester\AppData\Roaming"),
+        local_appdata=Path(r"C:\Users\Tester\AppData\Local"),
+        desktop=Path(r"C:\Users\Tester\Desktop"),
+        windows=Path(r"C:\Windows"),
+        program_data=Path(r"C:\ProgramData"),
+        public=Path(r"C:\Users\Public"),
+        program_files=Path(r"D:\Apps64"),
+        program_files_x86=Path(r"D:\Apps32"),
+    )
+
+    plan = InstallPlanner(layout, folders).build()
+
+    assert plan.metadata["program_files"] == r"D:\Apps64"
+    assert plan.metadata["program_files_x86"] == r"D:\Apps32"
