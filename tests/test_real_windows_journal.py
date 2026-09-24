@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from pathlib import Path
 
@@ -561,6 +562,72 @@ def test_archive_file_install_refuses_different_preexisting_shared_file(
     else:
         raise AssertionError("expected conflicting shared file to be refused")
     assert destination.read_bytes() == b"external-version"
+
+
+def test_archive_file_install_refuses_dangling_destination_reparse_point_without_creating_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A dangling symlink/reparse point at the destination must never be written through.
+
+    ``Path.exists()`` is False for a symlink whose target is missing, so an
+    existence check based on it would fall through and create the file at the
+    link target.  The adapter's ``lexists`` gate must instead refuse the
+    destination outright, leave the filesystem untouched and keep the journal
+    from claiming ownership of a file it never created.
+    """
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive-placeholder")
+    destination = tmp_path / "Program Files" / "Shared" / "runtime.dll"
+    assert not destination.exists()
+    assert not os.path.lexists(destination)
+    state_path = tmp_path / "state.json"
+
+    read_calls: list[str] = []
+
+    def read_member(operation) -> bytes:
+        read_calls.append(str(operation.destination))
+        return b"runtime-v1"
+
+    monkeypatch.setattr(rw, "_read_archive_member", read_member)
+    real_lexists = os.path.lexists
+
+    def fake_lexists(path) -> bool:
+        # Emulate a dangling symlink/reparse point: lexists() is True while the
+        # path is not a regular file and does not exist for exists().
+        if Path(path) == destination:
+            return True
+        return real_lexists(path)
+
+    monkeypatch.setattr(rw.os.path, "lexists", fake_lexists)
+    plan = InstallPlan(
+        operations=(
+            rw.InstallArchiveFile(archive, "Program Files/Shared/runtime.dll", destination, "zzz"),
+            WriteInstallState(state_path, {"test": True}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    try:
+        rw.RealWindowsAdapter(allow_non_windows_for_tests=True).apply_plan(plan)
+    except RuntimeError as exc:
+        assert "exists but is not a file" in str(exc)
+    else:
+        raise AssertionError("expected dangling destination to be refused")
+
+    # The payload was read before the decision, so the refusal is about the
+    # destination gate and not an early member-read failure.
+    assert read_calls == [str(destination)]
+    assert not real_lexists(destination)
+    assert not destination.exists()
+    assert not destination.parent.exists()
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["created_files"] == {}
+    assert str(destination) not in state["created_files"]
+    assert state["status"] == "failed"
 
 
 def test_archive_file_install_reuses_different_preexisting_shared_file_when_allowed(

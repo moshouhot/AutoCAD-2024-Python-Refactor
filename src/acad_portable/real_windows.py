@@ -446,18 +446,26 @@ class RealWindowsAdapter:
         if isinstance(operation, InstallArchiveFile):
             payload = _read_archive_member(operation)
             wanted_sha = hashlib.sha256(payload).hexdigest()
-            if operation.destination.is_file():
-                current_sha = _file_sha256(operation.destination)
-                if current_sha == wanted_sha:
-                    return
-                if operation.reuse_existing:
-                    return
+            # lexists() is the single existence gate: it is True for dangling
+            # symlinks and other reparse points whose target is missing, which
+            # exists() reports as absent.  A present-but-not-regular-file
+            # destination must never be written through, so the create/write
+            # path below is reachable only when lexists reports the
+            # destination absent.
+            if os.path.lexists(operation.destination):
+                if operation.destination.is_file():
+                    current_sha = _file_sha256(operation.destination)
+                    if current_sha == wanted_sha:
+                        return
+                    if operation.reuse_existing:
+                        return
+                    raise RuntimeError(
+                        "refusing to overwrite existing shared file with different content: "
+                        f"{operation.destination}"
+                    )
                 raise RuntimeError(
-                    "refusing to overwrite existing shared file with different content: "
-                    f"{operation.destination}"
+                    f"file destination exists but is not a file: {operation.destination}"
                 )
-            if operation.destination.exists():
-                raise RuntimeError(f"file destination exists but is not a file: {operation.destination}")
             operation.destination.parent.mkdir(parents=True, exist_ok=True)
             operation.destination.write_bytes(payload)
             state.setdefault("created_files", {})[str(operation.destination)] = {

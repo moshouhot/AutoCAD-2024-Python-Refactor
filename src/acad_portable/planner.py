@@ -593,6 +593,14 @@ class InstallPlanner:
         rebaser: PathRebaser,
         warnings: list[str],
     ) -> list[Operation]:
+        """Plan the AcadVBA application entry from the AutoCAD registry files.
+
+        Every value is planned with ``preserve_existing=True``: an external
+        value already present on the machine is never taken over on first
+        install, while values we create stay installer-owned and can still be
+        updated by a later upgrade (ownership is tracked in the journal, not
+        by this flag).
+        """
         ops: list[Operation] = []
         for section in document.sections:
             if section.deleted:
@@ -613,7 +621,15 @@ class InstallPlanner:
                         warnings.append(
                             f"Unresolved legacy VBA path: {section.key} [{value.name}] -> {data}"
                         )
-                ops.append(SetRegistryValue(section.key, value.name, value.kind, data))
+                ops.append(
+                    SetRegistryValue(
+                        section.key,
+                        value.name,
+                        value.kind,
+                        data,
+                        preserve_existing=True,
+                    )
+                )
         return ops
 
     def _reg3_core_ops(

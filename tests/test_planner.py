@@ -441,6 +441,11 @@ def test_vba_base_plan_includes_minimal_msi_identity_and_excludes_untraced_insta
         if "AcVBA2024.Bundle" in op.member
     )
     assert any("\\Applications\\AcadVBA" in op.key for op in values)
+    acadvba_values = [
+        op for op in values if "\\applications\\acadvba" in op.key.casefold()
+    ]
+    assert acadvba_values
+    assert all(op.preserve_existing for op in acadvba_values)
     assert any("MSAPC.ApcGlobal" in op.key for op in values)
     assert any("SOFTWARE\\Microsoft\\VBA" in op.key for op in values)
     assert all("\\Installer\\Products\\FAKE" not in op.key for op in values)
