@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import copy
+import ctypes
 import hashlib
 import json
 import ntpath
@@ -248,6 +251,15 @@ class RealWindowsAdapter:
         _write_state(state_path, state)
 
         applied = 0
+        # Apply-local rollback journal for destructive retirement of
+        # installer-owned archive files.  Payload bytes are deliberately kept
+        # here and never written into the persistent state file: the journal
+        # only has to survive this one apply call.  ``ownership_snapshot``
+        # captures the file-ownership maps immediately before retirement so a
+        # later failure can put ownership back the way it was, instead of
+        # leaving a restored file that the journal has already disowned.
+        rollback_journal: list[tuple[Path, bytes]] = []
+        ownership_snapshot: tuple[dict[str, Any], dict[str, Any]] | None = None
         try:
             for index, operation in enumerate(plan.operations):
                 if isinstance(operation, WriteInstallState):
@@ -255,13 +267,35 @@ class RealWindowsAdapter:
                 self._apply(operation, state, archive_payloads.get(index))
                 applied += 1
             self._reconcile_retired_registry_ownership(plan, state)
-            self._reconcile_retired_file_ownership(plan, state)
+            ownership_snapshot = (
+                copy.deepcopy(state.setdefault("created_files", {})),
+                copy.deepcopy(state.setdefault("retired_files", {})),
+            )
+            self._reconcile_retired_file_ownership(plan, state, rollback_journal)
             state["status"] = "complete"
             _write_state(state_path, state)
-        except Exception:
+        except Exception as exc:
+            # Undo only this round's destructive file retirements.  Ordinary
+            # plan operations and registry reconciliation keep their existing
+            # failure semantics; this is not a whole-install transaction and
+            # makes no crash-transactional claim.
+            rollback_failure = _rollback_retired_files(
+                rollback_journal, ownership_snapshot, state
+            )
             state["status"] = "failed"
             state["applied_operations"] = applied
-            _write_state(state_path, state)
+            state_write_failure: Exception | None = None
+            try:
+                _write_state(state_path, state)
+            except Exception as write_exc:  # pragma: no cover - defensive
+                state_write_failure = write_exc
+            if rollback_failure is not None or state_write_failure is not None:
+                problems: list[str] = []
+                if rollback_failure is not None:
+                    problems.append(f"retired-file rollback failed: {rollback_failure}")
+                if state_write_failure is not None:
+                    problems.append(f"failed-state write failed: {state_write_failure}")
+                raise RuntimeError("; ".join(problems)) from exc
             raise
         return ApplyReport(operations=applied, state_path=state_path)
 
@@ -338,6 +372,7 @@ class RealWindowsAdapter:
         self,
         plan: InstallPlan,
         state: dict[str, Any],
+        rollback_journal: list[tuple[Path, bytes]],
     ) -> None:
         """Release installer-owned archive files that left the upgraded plan.
 
@@ -346,6 +381,12 @@ class RealWindowsAdapter:
         file that is missing or was changed externally is left in place and
         ownership is released.  Retired entries are recorded under
         ``retired_files`` so a later uninstall never touches them again.
+
+        Before a still-owned file is unlinked its full payload is read and
+        appended to ``rollback_journal`` (newest last).  ``apply_plan`` uses
+        that journal to restore the bytes and the ownership maps when any
+        later step fails, so the destructive delete is reversible for the
+        lifetime of this apply call.
         """
         planned_destinations = {
             _windows_path_key(operation.destination)
@@ -380,7 +421,15 @@ class RealWindowsAdapter:
                 }
                 del created[path_text]
                 continue
-            path.unlink()
+            payload = path.read_bytes()
+            rollback_journal.append((path, payload))
+            try:
+                path.unlink()
+            except Exception:
+                # The delete never happened, so drop the not-yet-actionable
+                # journal entry before the failure propagates.
+                rollback_journal.pop()
+                raise
             retired[path_text] = {
                 "action": "removed",
                 "installed_sha256": installed_sha,
@@ -807,6 +856,36 @@ def inspect_install_state(path: Path) -> dict[str, Any]:
     }
 
 
+def _rollback_retired_files(
+    rollback_journal: list[tuple[Path, bytes]],
+    ownership_snapshot: tuple[dict[str, Any], dict[str, Any]] | None,
+    state: dict[str, Any],
+) -> Exception | None:
+    """Undo this apply call's destructive file retirements.
+
+    Successful deletions are restored in reverse order through the project's
+    own atomic-write path (never a bare ``write_bytes``), then the journal's
+    file-ownership maps are reset to the pre-retirement snapshot so a restored
+    file is still recorded as installer-owned instead of silently disowned.
+    Restoration is attempted for every entry even if an earlier one fails, and
+    the caller is told about any failure so it can fail loudly rather than
+    reporting a clean rollback.  Returns ``None`` when nothing failed.
+    """
+    problems: list[str] = []
+    for path, payload in reversed(rollback_journal):
+        try:
+            _atomic_write_bytes(path, payload)
+        except Exception as exc:  # noqa: BLE001 - aggregated below
+            problems.append(f"{path}: {exc}")
+    if ownership_snapshot is not None:
+        created_snapshot, retired_snapshot = ownership_snapshot
+        state["created_files"] = created_snapshot
+        state["retired_files"] = retired_snapshot
+    if problems:
+        return RuntimeError("; ".join(problems))
+    return None
+
+
 def _write_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
@@ -1057,32 +1136,195 @@ def _create_shortcut(operation: CreateShortcut) -> None:
         )
 
 
+class _Filetime(ctypes.Structure):
+    _fields_ = [
+        ("dwLowDateTime", ctypes.c_uint32),
+        ("dwHighDateTime", ctypes.c_uint32),
+    ]
+
+
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", ctypes.c_uint32),
+        ("ftCreationTime", _Filetime),
+        ("ftLastAccessTime", _Filetime),
+        ("ftLastWriteTime", _Filetime),
+        ("dwVolumeSerialNumber", ctypes.c_uint32),
+        ("nFileSizeHigh", ctypes.c_uint32),
+        ("nFileSizeLow", ctypes.c_uint32),
+        ("nNumberOfLinks", ctypes.c_uint32),
+        ("nFileIndexHigh", ctypes.c_uint32),
+        ("nFileIndexLow", ctypes.c_uint32),
+    ]
+
+
+# Directory open flags/rights used by the Windows parent-chain lock.
+_FILE_LIST_DIRECTORY = 0x0001
+_FILE_READ_ATTRIBUTES = 0x0080
+_FILE_SHARE_READ = 0x00000001
+_FILE_SHARE_WRITE = 0x00000002
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_INVALID_HANDLE_VALUE = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
+
+_KERNEL32: Any = None
+
+
+def _get_kernel32():
+    """Return ``kernel32`` with explicit signatures, loading it once.
+
+    Explicit ``restype``/``argtypes`` matter: without them ctypes truncates
+    the 64-bit ``HANDLE`` returned by ``CreateFileW`` to a 32-bit int, which
+    would silently break handle comparisons and ``CloseHandle``.
+    """
+    global _KERNEL32
+    if _KERNEL32 is None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = ctypes.c_void_p
+        kernel32.CreateFileW.argtypes = (
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        )
+        kernel32.GetFileInformationByHandle.restype = ctypes.c_int
+        kernel32.GetFileInformationByHandle.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(_ByHandleFileInformation),
+        )
+        kernel32.CloseHandle.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        _KERNEL32 = kernel32
+    return _KERNEL32
+
+
+def _open_locked_directory(kernel32, directory: Path) -> int:
+    """Open ``directory`` and hold it against rename/delete.
+
+    ``FILE_SHARE_READ | FILE_SHARE_WRITE`` deliberately omits
+    ``FILE_SHARE_DELETE``: on Windows a delete/rename of the directory entry
+    needs delete access, so withholding the share bit while holding a data
+    access right (``FILE_LIST_DIRECTORY``) makes a concurrent rename fail with
+    a sharing violation instead of silently redirecting our write.  A
+    read-attributes-only handle is *not* sufficient -- empirically the rename
+    still succeeds -- so the list-directory right is required too.
+
+    ``FILE_FLAG_OPEN_REPARSE_POINT`` makes the handle refer to the directory
+    entry itself, so the metadata check below sees a planted junction rather
+    than its target.  Any failure raises instead of falling back to an
+    unlocked write.
+    """
+    handle = kernel32.CreateFileW(
+        str(directory),
+        _FILE_LIST_DIRECTORY | _FILE_READ_ATTRIBUTES,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if not handle or handle == _INVALID_HANDLE_VALUE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    info = _ByHandleFileInformation()
+    if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(handle)
+        raise ctypes.WinError(error)
+    attributes = info.dwFileAttributes
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        kernel32.CloseHandle(handle)
+        raise RuntimeError(
+            f"refusing to write below a reparse-point directory: {directory}"
+        )
+    if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+        kernel32.CloseHandle(handle)
+        raise RuntimeError(f"expected a directory while locking the parent chain: {directory}")
+    return handle
+
+
+def _iter_directory_chain(target: Path):
+    """Yield each real directory from the filesystem anchor down to ``target``.
+
+    The anchor itself (``C:\\`` or a UNC share root) cannot be renamed or
+    replaced by another process, so it is used as the immovable base and only
+    the components below it are locked.  Relative paths are already frozen to
+    absolute by the caller, so this never walks out of the intended tree.
+    """
+    anchor = Path(target.anchor)
+    try:
+        parts = target.relative_to(anchor).parts
+    except ValueError:
+        parts = target.parts
+    current = anchor
+    for part in parts:
+        current = current / part
+        yield current
+
+
+@contextlib.contextmanager
+def _locked_parent_chain(path: Path):
+    """Hold every existing directory of ``path.parent`` against rename/delete.
+
+    Yields the frozen absolute destination path (``abspath`` normalizes ``..``
+    lexically but never resolves symlinks) so the caller performs its reparse
+    checks, temp creation and ``os.replace`` on exactly the path that was
+    locked.  On a non-Windows host this is a transparent pass-through: it
+    keeps the existing portable behaviour instead of pretending to offer the
+    Windows anti-race guarantee.
+    """
+    if os.name != "nt":
+        yield path
+        return
+
+    frozen = Path(os.path.abspath(str(path)))
+    kernel32 = _get_kernel32()
+    handles: list[int] = []
+    try:
+        for directory in _iter_directory_chain(frozen.parent):
+            handles.append(_open_locked_directory(kernel32, directory))
+        yield frozen
+    finally:
+        for handle in reversed(handles):
+            kernel32.CloseHandle(handle)
+
+
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     """Expose ``payload`` at ``path`` atomically, never leaving a partial file.
 
     The bytes are written to a sibling temp file in the same directory, flushed
     and fsynced, then moved into place with ``os.replace``.  A failure at any
     point removes the temp file, so the destination is either untouched or
-    complete; it is never truncated.  The reparse guard is re-checked
-    immediately before the replace so a parent swapped in after the caller's
-    check cannot silently redirect the rename.  This closes the partial-write
-    failure window but does not claim to be crash-transactional.
+    complete; it is never truncated.  On Windows the whole sequence runs while
+    every directory in ``path.parent`` is held open without
+    ``FILE_SHARE_DELETE``, so a concurrent process cannot rename a parent
+    directory and swap in a junction between the reparse check and the
+    replace; the reparse guard is still re-checked immediately before the
+    replace.  This closes the partial-write and parent-swap windows but does
+    not claim to be crash-transactional.
     """
-    fd, temp_name = tempfile.mkstemp(
-        prefix=path.name + ".", suffix=".tmp", dir=path.parent
-    )
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        _reject_reparse_path(path)
-        os.replace(temp_name, path)
-    finally:
+    with _locked_parent_chain(path) as locked_path:
+        _reject_reparse_path(locked_path)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=locked_path.name + ".", suffix=".tmp", dir=locked_path.parent
+        )
         try:
-            os.unlink(temp_name)
-        except OSError:
-            pass
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            _reject_reparse_path(locked_path)
+            os.replace(temp_name, locked_path)
+        finally:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
 
 
 def _is_reparse_or_symlink(path: Path) -> bool:
@@ -1127,7 +1369,8 @@ def _reject_reparse_path(path: Path) -> None:
     are checked.  Without the ancestor check an attacker who can plant a
     symlink/junction in a parent directory could redirect our mkdir/write/
     replace outside the planned tree.  A concurrent swap between this check
-    and the write remains possible and is explicitly out of scope.
+    and the write is closed on Windows by ``_locked_parent_chain``; on other
+    hosts the portable fallback keeps only this check.
     """
     if _is_reparse_or_symlink(path):
         raise RuntimeError(f"refusing to write through a reparse point: {path}")

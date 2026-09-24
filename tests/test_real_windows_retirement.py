@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
+import pytest
+
 import acad_portable.real_windows as rw
+from acad_portable.ops import WriteInstallState
+from acad_portable.planner import InstallPlan
 
 from test_real_windows_journal import RegistryMemory, patch_registry_backend
 from test_real_windows_remediation import (
@@ -125,3 +130,216 @@ def test_live_diff_matches_apply_for_external_bytes_equal_to_payload_reuse(
     assert report.file_reuse == 1
     assert report.file_same == 0
     assert report.file_conflict == 0
+
+
+# --- G: destructive retirement must roll back on a later apply failure -------
+
+
+def _fail_final_state_write(monkeypatch) -> None:
+    """Make only the post-retirement ``complete`` state write fail."""
+    real_write_state = rw._write_state
+
+    def failing_write_state(path: Path, state) -> None:
+        if state.get("status") == "complete":
+            raise OSError("simulated final state write failure")
+        real_write_state(path, state)
+
+    monkeypatch.setattr(rw, "_write_state", failing_write_state)
+
+
+def test_final_state_write_failure_rolls_back_retired_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failure after the unlink must restore bytes and ownership, not lose data."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "AcVba.arx"
+    state_path = tmp_path / "state.json"
+    payload = {"value": b"runtime-v1"}
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: payload["value"])
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _archive_plan(state_path, archive, "Program Files/AcVba.arx", destination)
+    )
+    old_sha = hashlib.sha256(b"runtime-v1").hexdigest()
+
+    _fail_final_state_write(monkeypatch)
+    with pytest.raises(OSError, match="simulated final state write failure"):
+        adapter.apply_plan(_no_file_plan(state_path))
+
+    # The stale owned file is back, byte for byte.
+    assert destination.read_bytes() == b"runtime-v1"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["status"] == "failed"
+    # Ownership is back with the file: it is not silently retired.
+    owned = _entry(state["created_files"], destination)
+    assert owned is not None and owned["installed_sha256"] == old_sha
+    assert _entry(state["retired_files"], destination) is None
+
+    # The restored file is still uninstallable as installer-owned.
+    report = adapter.uninstall(state_path)
+    assert report.conflicts == ()
+    assert report.files_removed == 1
+    assert not destination.exists()
+
+
+def test_retirement_success_path_still_removes_and_records_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Without a failure the stale owned file is genuinely deleted."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "AcVba.arx"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _archive_plan(state_path, archive, "Program Files/AcVba.arx", destination)
+    )
+
+    adapter.apply_plan(_no_file_plan(state_path))
+
+    assert not destination.exists()
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["status"] == "complete"
+    assert state["created_files"] == {}
+    retired = _entry(state["retired_files"], destination)
+    assert retired is not None and retired["action"] == "removed"
+
+
+def test_retirement_rollback_restores_multiple_files_in_reverse(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Several retired files are all restored; newest-deleted is restored first."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    first = tmp_path / "Apps64" / "first.dll"
+    second = tmp_path / "Apps64" / "second.dll"
+    state_path = tmp_path / "state.json"
+    payloads = {
+        "Program Files/first.dll": b"first-v1",
+        "Program Files/second.dll": b"second-v1",
+    }
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: payloads[op.member])
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    plan = InstallPlan(
+        operations=(
+            rw.InstallArchiveFile(archive, "Program Files/first.dll", first, "zzz"),
+            rw.InstallArchiveFile(archive, "Program Files/second.dll", second, "zzz"),
+            WriteInstallState(state_path, {"version": 1}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+    adapter.apply_plan(plan)
+
+    restored_order: list[str] = []
+    real_atomic = rw._atomic_write_bytes
+
+    def spy_atomic(path, payload):
+        restored_order.append(Path(path).name)
+        return real_atomic(path, payload)
+
+    monkeypatch.setattr(rw, "_atomic_write_bytes", spy_atomic)
+    _fail_final_state_write(monkeypatch)
+
+    with pytest.raises(OSError, match="simulated final state write failure"):
+        adapter.apply_plan(_no_file_plan(state_path))
+
+    assert first.read_bytes() == b"first-v1"
+    assert second.read_bytes() == b"second-v1"
+    assert restored_order == ["second.dll", "first.dll"]
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert _entry(state["created_files"], first) is not None
+    assert _entry(state["created_files"], second) is not None
+    assert state["retired_files"] == {}
+
+
+def test_retirement_rollback_failure_is_loud_and_keeps_original_context(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failing restore must not be reported as a clean rollback."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "AcVba.arx"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _archive_plan(state_path, archive, "Program Files/AcVba.arx", destination)
+    )
+
+    _fail_final_state_write(monkeypatch)
+
+    def failing_restore(path, payload):
+        raise OSError("simulated restore failure")
+
+    monkeypatch.setattr(rw, "_atomic_write_bytes", failing_restore)
+
+    with pytest.raises(RuntimeError, match="retired-file rollback failed") as excinfo:
+        adapter.apply_plan(_no_file_plan(state_path))
+
+    # Original failure stays attached as context for diagnosis.
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert "simulated final state write failure" in str(excinfo.value.__cause__)
+
+
+def test_partial_retirement_failure_rolls_back_already_deleted_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If retirement fails midway, files already unlinked are restored."""
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    first = tmp_path / "Apps64" / "first.dll"
+    second = tmp_path / "Apps64" / "second.dll"
+    state_path = tmp_path / "state.json"
+    payloads = {
+        "Program Files/first.dll": b"first-v1",
+        "Program Files/second.dll": b"second-v1",
+    }
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: payloads[op.member])
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    plan = InstallPlan(
+        operations=(
+            rw.InstallArchiveFile(archive, "Program Files/first.dll", first, "zzz"),
+            rw.InstallArchiveFile(archive, "Program Files/second.dll", second, "zzz"),
+            WriteInstallState(state_path, {"version": 1}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+    adapter.apply_plan(plan)
+
+    real_unlink = Path.unlink
+
+    def failing_unlink(self, *args, **kwargs):
+        if self == second:
+            raise OSError("simulated unlink failure")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    with pytest.raises(OSError, match="simulated unlink failure"):
+        adapter.apply_plan(_no_file_plan(state_path))
+
+    # Whichever file was deleted first is restored; nothing is lost.
+    assert first.read_bytes() == b"first-v1"
+    assert second.read_bytes() == b"second-v1"
+    state = rw._load_state(state_path)
+    assert state is not None
+    assert state["status"] == "failed"
+    assert _entry(state["created_files"], first) is not None
+    assert _entry(state["created_files"], second) is not None

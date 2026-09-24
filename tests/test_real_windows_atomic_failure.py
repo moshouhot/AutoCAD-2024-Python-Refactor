@@ -378,3 +378,120 @@ def test_archive_preflight_cache_reads_each_operation_once_and_refreshes_next_ap
     assert second_entry is not None
     assert first_entry["installed_sha256"] == hashlib.sha256(b"first-v2").hexdigest()
     assert second_entry["installed_sha256"] == hashlib.sha256(b"second-v2").hexdigest()
+
+
+# --- H: Windows parent-junction race is closed by the directory-chain lock ---
+
+
+_win_only = pytest.mark.skipif(os.name != "nt", reason="Windows filesystem semantics")
+
+
+@_win_only
+def test_atomic_write_blocks_parent_rename_between_check_and_replace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A concurrent parent rename at replace time must fail, not redirect the write."""
+    parent = tmp_path / "Apps64"
+    parent.mkdir()
+    destination = parent / "AcVba.arx"
+    moved_parent = tmp_path / "moved-Apps64"
+    real_replace = rw.os.replace
+    observed: list[str] = []
+
+    def rename_attempting_replace(src, dst):
+        if Path(dst) == destination:
+            try:
+                os.rename(parent, moved_parent)
+            except OSError as exc:
+                observed.append(f"blocked:{exc.winerror}")
+            else:
+                observed.append("renamed")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(rw.os, "replace", rename_attempting_replace)
+
+    rw._atomic_write_bytes(destination, b"payload")
+
+    # The parent-chain handles withhold FILE_SHARE_DELETE, so the rename is a
+    # sharing violation rather than a silent redirection.
+    assert observed == ["blocked:32"], observed
+    assert destination.read_bytes() == b"payload"
+    assert not (moved_parent / "AcVba.arx").exists()
+    assert not list(parent.glob("*.tmp"))
+
+
+@_win_only
+def test_atomic_write_blocks_higher_ancestor_rename(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An ancestor above the immediate parent is locked as well."""
+    top = tmp_path / "top"
+    parent = top / "Apps64"
+    parent.mkdir(parents=True)
+    destination = parent / "AcVba.arx"
+    moved_top = tmp_path / "moved-top"
+    real_replace = rw.os.replace
+    observed: list[str] = []
+
+    def rename_attempting_replace(src, dst):
+        if Path(dst) == destination:
+            try:
+                os.rename(top, moved_top)
+            except OSError as exc:
+                observed.append(f"blocked:{exc.winerror}")
+            else:
+                observed.append("renamed")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(rw.os, "replace", rename_attempting_replace)
+
+    rw._atomic_write_bytes(destination, b"payload")
+
+    assert observed == ["blocked:32"], observed
+    assert destination.read_bytes() == b"payload"
+    assert not (moved_top / "Apps64" / "AcVba.arx").exists()
+
+
+@_win_only
+def test_atomic_write_fails_closed_on_reparse_parent(tmp_path: Path) -> None:
+    """A junction/symlink parent is refused and no payload is written."""
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    link_parent = tmp_path / "link-parent"
+    try:
+        os.symlink(real_parent, link_parent, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        rw._create_junction(link_parent, real_parent)
+
+    with pytest.raises(RuntimeError, match="reparse"):
+        rw._atomic_write_bytes(link_parent / "AcVba.arx", b"payload")
+
+    assert not (real_parent / "AcVba.arx").exists()
+    assert not list(real_parent.glob("*.tmp"))
+
+
+@_win_only
+def test_atomic_write_releases_directory_handles_on_success_and_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Held directory handles are always closed, so the parent stays renameable."""
+    parent = tmp_path / "Apps64"
+    parent.mkdir()
+    destination = parent / "AcVba.arx"
+
+    rw._atomic_write_bytes(destination, b"payload")
+    os.rename(parent, tmp_path / "moved")
+    os.rename(tmp_path / "moved", parent)
+
+    def failing_replace(src, dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(rw.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        rw._atomic_write_bytes(destination, b"other")
+    monkeypatch.undo()
+
+    # No leaked handle: the parent can still be renamed after the failure.
+    os.rename(parent, tmp_path / "moved2")
+    os.rename(tmp_path / "moved2", parent)
+    assert not list(parent.glob("*.tmp"))
