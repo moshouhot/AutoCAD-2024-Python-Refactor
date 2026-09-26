@@ -629,3 +629,24 @@ def test_known_folders_uses_system32_for_native_process(monkeypatch) -> None:
     folders = KnownFolders.current()
 
     assert folders.native_system32 == Path(r"C:\Windows\System32")
+
+
+def test_known_folders_native_system32_preserves_native_test_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """POSIX CI temp roots must remain real filesystem paths, not NT strings."""
+    _clear_program_files_env(monkeypatch)
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+    windows_root = tmp_path / "Windows"
+    folders = KnownFolders(
+        user_profile=tmp_path / "User",
+        appdata=tmp_path / "AppData" / "Roaming",
+        local_appdata=tmp_path / "AppData" / "Local",
+        desktop=tmp_path / "Desktop",
+        windows=windows_root,
+        program_data=tmp_path / "ProgramData",
+        public=tmp_path / "Public",
+    )
+
+    assert folders.native_system32 == windows_root / "System32"

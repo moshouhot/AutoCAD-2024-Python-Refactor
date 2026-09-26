@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 from collections import Counter
@@ -204,9 +205,23 @@ class KnownFolders:
         """
         architecture = os.environ.get("PROCESSOR_ARCHITECTURE", "").casefold()
         wow64_architecture = os.environ.get("PROCESSOR_ARCHITEW6432")
-        if wow64_architecture and architecture in {"x86", "i386", "i686"}:
-            return self.windows / "Sysnative"
-        return self.windows / "System32"
+        leaf = (
+            "Sysnative"
+            if wow64_architecture and architecture in {"x86", "i386", "i686"}
+            else "System32"
+        )
+
+        # The package is Windows-only, but planner tests also run on POSIX CI.
+        # When a Windows-looking root such as ``C:\\Windows`` is represented by
+        # a POSIX ``Path``, using ``/`` would create ``C:\\Windows/System32``.
+        # Use Windows lexical joining only for roots that actually carry a
+        # Windows drive/UNC share.  Real POSIX roots used by tests (for example
+        # ``/tmp/.../Windows``) must keep native joining so filesystem probes
+        # such as FM20 dependency checks still address the real temp tree.
+        windows_text = str(self.windows)
+        if ntpath.splitdrive(windows_text)[0]:
+            return Path(ntpath.join(windows_text, leaf))
+        return self.windows / leaf
 
     @classmethod
     def current(cls) -> "KnownFolders":
