@@ -609,3 +609,23 @@ def test_known_folders_never_uses_programw6432_as_x86_root(monkeypatch) -> None:
     # No x86 variables at all: the stable default is used, not ProgramW6432.
     assert folders.program_files_x86 == Path(r"C:\Program Files (x86)")
     assert folders.program_files_x86 != folders.program_files
+
+
+def test_known_folders_uses_sysnative_for_wow64_native_system32(monkeypatch) -> None:
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "x86")
+    monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "AMD64")
+
+    folders = KnownFolders.current()
+
+    assert folders.native_system32 == Path(r"C:\Windows\Sysnative")
+
+
+def test_known_folders_uses_system32_for_native_process(monkeypatch) -> None:
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+
+    folders = KnownFolders.current()
+
+    assert folders.native_system32 == Path(r"C:\Windows\System32")

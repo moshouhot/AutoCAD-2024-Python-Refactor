@@ -191,6 +191,23 @@ class KnownFolders:
     program_files: Path = Path(r"C:\Program Files")
     program_files_x86: Path = Path(r"C:\Program Files (x86)")
 
+    @property
+    def native_system32(self) -> Path:
+        """Return the native 64-bit system directory under WOW64.
+
+        A 32-bit process on 64-bit Windows is redirected from ``System32`` to
+        ``SysWOW64``.  Windows exposes ``Sysnative`` specifically so a WOW64
+        process can address the native 64-bit directory.  The paired
+        environment variables are the documented signal that the current
+        process is 32-bit on a 64-bit host; normal 64-bit processes continue
+        to use ``System32`` directly.
+        """
+        architecture = os.environ.get("PROCESSOR_ARCHITECTURE", "").casefold()
+        wow64_architecture = os.environ.get("PROCESSOR_ARCHITEW6432")
+        if wow64_architecture and architecture in {"x86", "i386", "i686"}:
+            return self.windows / "Sysnative"
+        return self.windows / "System32"
+
     @classmethod
     def current(cls) -> "KnownFolders":
         user = Path(os.environ.get("USERPROFILE", str(Path.home())))
@@ -270,8 +287,8 @@ class InstallPlanner:
             operations.extend(self._vba_runtime_registry_ops(vba_registry, warnings))
             operations.extend(self._vba_msi_identity_ops(vba_registry))
             for shared_dependency in (
-                self.folders.windows / "System32" / "FM20.DLL",
-                self.folders.windows / "System32" / "FM20chs.DLL",
+                self.folders.native_system32 / "FM20.DLL",
+                self.folders.native_system32 / "FM20chs.DLL",
             ):
                 if not shared_dependency.is_file():
                     warnings.append(

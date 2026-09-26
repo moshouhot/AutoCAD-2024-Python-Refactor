@@ -23,15 +23,17 @@ from test_real_windows_remediation import (
 )
 
 
-def _fail_replace_for(destination: Path, monkeypatch) -> None:
-    real_replace = rw.os.replace
+def _fail_publish_for(destination: Path, monkeypatch, *, once: bool = False) -> None:
+    real_publish = rw._publish_temp_no_replace
+    failed = {"value": False}
 
-    def failing_replace(src, dst):
-        if Path(dst) == destination:
-            raise OSError("simulated replace failure")
-        return real_replace(src, dst)
+    def failing_publish(src, dst):
+        if Path(dst) == destination and (not once or not failed["value"]):
+            failed["value"] = True
+            raise OSError("simulated publish failure")
+        return real_publish(src, dst)
 
-    monkeypatch.setattr(rw.os, "replace", failing_replace)
+    monkeypatch.setattr(rw, "_publish_temp_no_replace", failing_publish)
 
 
 def test_atomic_create_failure_records_pending_hash_evidence(
@@ -45,7 +47,7 @@ def test_atomic_create_failure_records_pending_hash_evidence(
     destination = tmp_path / "Apps64" / "AcVba.arx"
     state_path = tmp_path / "state.json"
     monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
-    _fail_replace_for(destination, monkeypatch)
+    _fail_publish_for(destination, monkeypatch)
 
     try:
         rw.RealWindowsAdapter(allow_non_windows_for_tests=True).apply_plan(
@@ -54,7 +56,7 @@ def test_atomic_create_failure_records_pending_hash_evidence(
     except OSError:
         pass
     else:
-        raise AssertionError("expected replace failure to propagate")
+        raise AssertionError("expected publish failure to propagate")
 
     assert not destination.exists()
     state = rw._load_state(state_path)
@@ -84,7 +86,9 @@ def test_atomic_upgrade_failure_records_old_and_new_hash_evidence(
     )
     old_sha = hashlib.sha256(b"runtime-v1").hexdigest()
     new_sha = hashlib.sha256(b"runtime-v2").hexdigest()
-    _fail_replace_for(destination, monkeypatch)
+    # The new payload publication fails once; rollback publication of the old
+    # installer-owned bytes is then allowed to succeed.
+    _fail_publish_for(destination, monkeypatch, once=True)
     payload["value"] = b"runtime-v2"
 
     try:
@@ -96,7 +100,7 @@ def test_atomic_upgrade_failure_records_old_and_new_hash_evidence(
     except OSError:
         pass
     else:
-        raise AssertionError("expected replace failure to propagate")
+        raise AssertionError("expected publish failure to propagate")
 
     assert destination.read_bytes() == b"runtime-v1"
     state = rw._load_state(state_path)
@@ -568,3 +572,67 @@ def test_atomic_write_releases_directory_handles_on_success_and_failure(
     os.rename(parent, tmp_path / "moved2")
     os.rename(tmp_path / "moved2", parent)
     assert not list(parent.glob("*.tmp"))
+
+
+def test_atomic_create_preserves_file_that_appears_at_publish_time(
+    tmp_path: Path, monkeypatch
+) -> None:
+    destination = tmp_path / "Apps64" / "AcVba.arx"
+    destination.parent.mkdir(parents=True)
+    real_publish = rw._publish_temp_no_replace
+
+    def racing_publish(temp_name, target):
+        Path(target).write_bytes(b"external-race")
+        return real_publish(temp_name, target)
+
+    monkeypatch.setattr(rw, "_publish_temp_no_replace", racing_publish)
+
+    with pytest.raises(OSError):
+        rw._atomic_create_bytes(destination, b"installer-payload")
+
+    assert destination.read_bytes() == b"external-race"
+
+
+def test_archive_preflight_rejects_non_directory_parent_before_state_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    blocker = tmp_path / "Apps64"
+    blocker.write_bytes(b"not-a-directory")
+    destination = blocker / "AcVba.arx"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"payload")
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    plan = InstallPlan(
+        operations=(
+            InstallArchiveFile(archive, "AcVba.arx", destination, "zzz"),
+            WriteInstallState(state_path, {"version": 1}),
+        ),
+        warnings=(),
+        metadata={},
+    )
+
+    with pytest.raises(RuntimeError, match="non-directory parent"):
+        adapter.apply_plan(plan)
+
+    assert not state_path.exists()
+
+
+def test_reject_reparse_path_normalizes_posix_enotdir_to_parent_conflict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    blocker = tmp_path / "Apps64"
+    blocker.write_bytes(b"not-a-directory")
+    destination = blocker / "AcVba.arx"
+    real_lstat = rw.os.lstat
+
+    def posix_lstat(path):
+        if Path(path) == destination:
+            raise NotADirectoryError("simulated POSIX ENOTDIR")
+        return real_lstat(path)
+
+    monkeypatch.setattr(rw.os, "lstat", posix_lstat)
+
+    with pytest.raises(RuntimeError, match="non-directory parent"):
+        rw._reject_reparse_path(destination)

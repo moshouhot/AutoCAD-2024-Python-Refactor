@@ -100,6 +100,28 @@ def test_delete_owned_file_hash_mismatch_keeps_file_and_closes_handle(
     assert destination.read_bytes() == b"external-replacement"
 
 
+def test_delete_owned_file_metadata_error_propagates_and_preserves_ownership(
+    tmp_path: Path, monkeypatch
+) -> None:
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"payload-v1")
+    expected = hashlib.sha256(b"payload-v1").hexdigest()
+    real_lstat = rw.os.lstat
+
+    def denied_lstat(path):
+        if Path(path) == destination:
+            raise PermissionError("simulated metadata denial")
+        return real_lstat(path)
+
+    monkeypatch.setattr(rw.os, "lstat", denied_lstat)
+
+    with pytest.raises(PermissionError, match="simulated metadata denial"):
+        rw._delete_owned_file_by_handle(destination, expected)
+
+    assert destination.read_bytes() == b"payload-v1"
+
+
 @_win_only
 def test_delete_owned_file_missing_and_directory_are_classified(tmp_path: Path) -> None:
     missing = tmp_path / "Apps64" / "absent.dll"

@@ -242,13 +242,13 @@ def test_retirement_rollback_restores_multiple_files_in_reverse(
     adapter.apply_plan(plan)
 
     restored_order: list[str] = []
-    real_atomic = rw._atomic_write_bytes
+    real_atomic = rw._atomic_create_bytes
 
     def spy_atomic(path, payload):
         restored_order.append(Path(path).name)
         return real_atomic(path, payload)
 
-    monkeypatch.setattr(rw, "_atomic_write_bytes", spy_atomic)
+    monkeypatch.setattr(rw, "_atomic_create_bytes", spy_atomic)
     _fail_final_state_write(monkeypatch)
 
     with pytest.raises(OSError, match="simulated final state write failure"):
@@ -285,7 +285,7 @@ def test_retirement_rollback_failure_is_loud_and_keeps_original_context(
     def failing_restore(path, payload):
         raise OSError("simulated restore failure")
 
-    monkeypatch.setattr(rw, "_atomic_write_bytes", failing_restore)
+    monkeypatch.setattr(rw, "_atomic_create_bytes", failing_restore)
 
     with pytest.raises(RuntimeError, match="retired-file rollback failed") as excinfo:
         adapter.apply_plan(_no_file_plan(state_path))
@@ -293,6 +293,19 @@ def test_retirement_rollback_failure_is_loud_and_keeps_original_context(
     # Original failure stays attached as context for diagnosis.
     assert isinstance(excinfo.value.__cause__, OSError)
     assert "simulated final state write failure" in str(excinfo.value.__cause__)
+
+
+def test_retirement_rollback_preserves_concurrently_recreated_file(tmp_path: Path) -> None:
+    destination = tmp_path / "Apps64" / "runtime.dll"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"external-recreated")
+
+    problem = rw._rollback_retired_files(
+        [(destination, b"installer-old")], None, rw._new_state()
+    )
+
+    assert isinstance(problem, RuntimeError)
+    assert destination.read_bytes() == b"external-recreated"
 
 
 def test_partial_retirement_failure_rolls_back_already_deleted_file(

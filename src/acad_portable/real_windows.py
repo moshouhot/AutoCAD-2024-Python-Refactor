@@ -753,7 +753,11 @@ class RealWindowsAdapter:
                         }
                     )
                     state.setdefault("pending_files", {})[entry_key] = pending
-                    _atomic_write_bytes(operation.destination, payload)
+                    _atomic_upgrade_owned_bytes(
+                        operation.destination,
+                        payload,
+                        created[entry_key].get("installed_sha256"),
+                    )
                     created[entry_key] = pending
                     state.get("pending_files", {}).pop(entry_key, None)
                     return
@@ -797,7 +801,7 @@ class RealWindowsAdapter:
             ]:
                 del pending_files[stale_key]
             pending_files[entry_key] = pending
-            _atomic_write_bytes(operation.destination, payload)
+            _atomic_create_bytes(operation.destination, payload)
             # The new bytes are in place.  Collapse every canonical-equivalent
             # stale ownership key onto the path spelling actually written, so
             # the next same/upgrade/uninstall round cannot be misled by an old
@@ -1043,7 +1047,11 @@ def _rollback_retired_files(
     problems: list[str] = []
     for path, payload in reversed(rollback_journal):
         try:
-            _atomic_write_bytes(path, payload)
+            # A rollback must never replace a file another process recreated
+            # after our retirement unlink.  Publish the old bytes only when
+            # the path is still absent; an occupied path is a loud rollback
+            # conflict and is preserved verbatim.
+            _atomic_create_bytes(path, payload)
         except Exception as exc:  # noqa: BLE001 - aggregated below
             problems.append(f"{path}: {exc}")
     if ownership_snapshot is not None:
@@ -1527,6 +1535,53 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
                 pass
 
 
+def _publish_temp_no_replace(temp_name: str, destination: Path) -> None:
+    """Publish a complete sibling temp file without replacing ``destination``.
+
+    Windows ``rename`` is non-replacing.  POSIX ``rename`` replaces, so use a
+    hard-link publish there instead; the sibling temp file guarantees the same
+    filesystem.  Both forms fail atomically when another process wins the
+    destination name, preserving that external file.
+    """
+    if os.name == "nt":
+        os.rename(temp_name, destination)
+        return
+    os.link(temp_name, destination)
+
+
+def _atomic_create_bytes_locked(locked_path: Path, payload: bytes) -> None:
+    """Atomically create ``locked_path`` while its parent chain is held.
+
+    The destination must remain absent.  This is deliberately different from
+    ``_atomic_write_bytes``: archive ownership must never overwrite a file that
+    appeared after the installer's earlier absence check.
+    """
+    _reject_reparse_path(locked_path)
+    if os.path.lexists(locked_path):
+        raise FileExistsError(f"refusing to replace concurrently created file: {locked_path}")
+    fd, temp_name = tempfile.mkstemp(
+        prefix=locked_path.name + ".", suffix=".tmp", dir=locked_path.parent
+    )
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _reject_reparse_path(locked_path)
+        _publish_temp_no_replace(temp_name, locked_path)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+
+
+def _atomic_create_bytes(path: Path, payload: bytes) -> None:
+    """Create a complete file atomically without ever replacing an occupant."""
+    with _locked_parent_chain(path) as locked_path:
+        _atomic_create_bytes_locked(locked_path, payload)
+
+
 @dataclass(frozen=True)
 class OwnedFileDeletion:
     """Outcome of a handle-bound owned-file deletion attempt.
@@ -1603,7 +1658,6 @@ def _delete_owned_file_by_handle(
     if _is_reparse_or_symlink(path) or _has_reparse_ancestor(path):
         return OwnedFileDeletion("external", reason="reparse")
 
-    kernel32 = _get_kernel32()
     # Acquire the parent-directory lock separately so that a genuinely absent
     # parent chain is classified as ``missing`` while every failure *inside*
     # the locked window (metadata, read, disposition) keeps propagating as an
@@ -1614,52 +1668,144 @@ def _delete_owned_file_by_handle(
     except FileNotFoundError:
         return OwnedFileDeletion("missing")
     try:
-        handle = kernel32.CreateFileW(
-            str(frozen),
-            _GENERIC_READ | _DELETE | _FILE_READ_ATTRIBUTES,
-            _FILE_SHARE_READ,
-            None,
-            _OPEN_EXISTING,
-            _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-        )
-        if not handle or handle == _INVALID_HANDLE_VALUE:
-            error = ctypes.get_last_error()
-            if error in (_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND):
-                return OwnedFileDeletion("missing")
-            raise ctypes.WinError(error)
+        return _delete_owned_file_at_locked_path(frozen, expected_sha256)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _delete_owned_file_at_locked_path(
+    frozen: Path,
+    expected_sha256: str | None,
+) -> OwnedFileDeletion:
+    """Windows target-handle delete while the caller holds the parent chain."""
+    kernel32 = _get_kernel32()
+    handle = kernel32.CreateFileW(
+        str(frozen),
+        _GENERIC_READ | _DELETE | _FILE_READ_ATTRIBUTES,
+        _FILE_SHARE_READ,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if not handle or handle == _INVALID_HANDLE_VALUE:
+        error = ctypes.get_last_error()
+        if error in (_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND):
+            return OwnedFileDeletion("missing")
+        raise ctypes.WinError(error)
+    try:
+        info = _ByHandleFileInformation()
+        if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        attributes = info.dwFileAttributes
+        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            return OwnedFileDeletion("external", reason="reparse")
+        if attributes & _FILE_ATTRIBUTE_DIRECTORY:
+            return OwnedFileDeletion("external", reason="non-file")
+        if expected_sha256 is None:
+            return OwnedFileDeletion("external", reason="no recorded hash")
+
+        payload = _read_all_from_handle(kernel32, handle)
+        current_sha = hashlib.sha256(payload).hexdigest()
+        if current_sha != expected_sha256:
+            return OwnedFileDeletion("external", reason="hash mismatch")
+
+        disposition = _FileDispositionInfo(1)
+        if not kernel32.SetFileInformationByHandle(
+            handle,
+            _FILE_DISPOSITION_INFO_CLASS,
+            ctypes.byref(disposition),
+            ctypes.sizeof(disposition),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return OwnedFileDeletion("removed", payload=payload)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _atomic_upgrade_owned_bytes(
+    path: Path,
+    payload: bytes,
+    expected_sha256: str | None,
+) -> None:
+    """Upgrade only the exact installer-owned file, never a concurrent replacement.
+
+    On Windows the parent chain stays locked across handle-bound verification,
+    deletion and non-replacing publication of the new payload.  The target
+    handle denies write/delete sharing while it is hashed and removed.  If an
+    external process wins the now-free pathname before publication, creation
+    fails and that external file is preserved; rollback also refuses to
+    replace it.
+    """
+    if os.name != "nt":
+        deleted = _delete_owned_file_portable(path, expected_sha256)
+        if deleted.outcome != "removed" or deleted.payload is None:
+            raise RuntimeError(
+                f"owned file changed before upgrade: {path} ({deleted.reason or deleted.outcome})"
+            )
         try:
-            info = _ByHandleFileInformation()
-            if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
-                raise ctypes.WinError(ctypes.get_last_error())
-            attributes = info.dwFileAttributes
-            if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-                return OwnedFileDeletion("external", reason="reparse")
-            if attributes & _FILE_ATTRIBUTE_DIRECTORY:
-                return OwnedFileDeletion("external", reason="non-file")
-            if expected_sha256 is None:
-                # A real regular file exists, but without a recorded installed
-                # hash ownership cannot be verified.  Fail closed before
-                # reading its contents; missing/non-file targets retain their
-                # stronger classifications above.
-                return OwnedFileDeletion("external", reason="no recorded hash")
+            _atomic_create_bytes(path, payload)
+        except Exception as exc:
+            try:
+                _atomic_create_bytes(path, deleted.payload)
+            except Exception as rollback_exc:
+                raise RuntimeError(
+                    f"archive upgrade failed and rollback could not restore {path}: {rollback_exc}"
+                ) from exc
+            raise
+        return
 
-            payload = _read_all_from_handle(kernel32, handle)
-            current_sha = hashlib.sha256(payload).hexdigest()
-            if current_sha != expected_sha256:
-                return OwnedFileDeletion("external", reason="hash mismatch")
+    if _is_reparse_or_symlink(path) or _has_reparse_ancestor(path):
+        raise RuntimeError(f"owned file became a reparse path before upgrade: {path}")
+    lock = _locked_parent_chain(path)
+    try:
+        frozen = lock.__enter__()
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"owned file disappeared before upgrade: {path}") from exc
+    try:
+        # Prepare and durably flush the complete new payload *before* touching
+        # the installed file.  Disk-full/temp-write failures therefore leave
+        # the old owned file intact and never require rollback.
+        fd, temp_name = tempfile.mkstemp(
+            prefix=frozen.name + ".", suffix=".tmp", dir=frozen.parent
+        )
+        try:
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except Exception:
+                # fd belongs to fdopen once entered; if fdopen itself failed,
+                # close the raw descriptor before propagating.
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
 
-            disposition = _FileDispositionInfo(1)
-            if not kernel32.SetFileInformationByHandle(
-                handle,
-                _FILE_DISPOSITION_INFO_CLASS,
-                ctypes.byref(disposition),
-                ctypes.sizeof(disposition),
-            ):
-                raise ctypes.WinError(ctypes.get_last_error())
-            return OwnedFileDeletion("removed", payload=payload)
+            deleted = _delete_owned_file_at_locked_path(frozen, expected_sha256)
+            if deleted.outcome != "removed" or deleted.payload is None:
+                raise RuntimeError(
+                    f"owned file changed before upgrade: {path} ({deleted.reason or deleted.outcome})"
+                )
+            try:
+                _publish_temp_no_replace(temp_name, frozen)
+                temp_name = ""
+            except Exception as exc:
+                try:
+                    _atomic_create_bytes_locked(frozen, deleted.payload)
+                except Exception as rollback_exc:
+                    raise RuntimeError(
+                        f"archive upgrade failed and rollback could not restore {path}: {rollback_exc}"
+                    ) from exc
+                raise
         finally:
-            kernel32.CloseHandle(handle)
+            if temp_name:
+                try:
+                    os.unlink(temp_name)
+                except OSError:
+                    pass
     finally:
         lock.__exit__(None, None, None)
 
@@ -1698,11 +1844,18 @@ def _is_reparse_or_symlink(path: Path) -> bool:
     """
     try:
         info = os.lstat(path)
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
+        # ENOENT and ENOTDIR both mean there is no target object at this
+        # pathname.  ENOTDIR is deterministic path-shape evidence (one of the
+        # parent components is a regular file), not a transient metadata
+        # failure.  Let the caller's ancestor walk report that parent as a
+        # non-directory.  Other OSErrors (PermissionError, I/O errors, etc.)
+        # still propagate so ownership is never silently released.
         return False
     except OSError:
-        # Fail closed: an unreadable path must not be treated as safe.
-        return True
+        # Metadata failure is not evidence that ownership changed.  Propagate
+        # it so callers fail closed and retain ownership for a later retry.
+        raise
     if stat.S_ISLNK(info.st_mode):
         return True
     attributes = getattr(info, "st_file_attributes", 0)
@@ -1736,10 +1889,15 @@ def _reject_reparse_path(path: Path) -> None:
     """
     if _is_reparse_or_symlink(path):
         raise RuntimeError(f"refusing to write through a reparse point: {path}")
-    if _has_reparse_ancestor(path):
-        raise RuntimeError(
-            f"refusing to write below a reparse point in a parent directory: {path}"
-        )
+    for ancestor in _iter_ancestors(path):
+        if _is_reparse_or_symlink(ancestor):
+            raise RuntimeError(
+                f"refusing to write below a reparse point in a parent directory: {path}"
+            )
+        if os.path.lexists(ancestor) and not ancestor.is_dir():
+            raise RuntimeError(
+                f"refusing to write below a non-directory parent component: {ancestor}"
+            )
 
 
 def _file_sha256(path: Path) -> str | None:

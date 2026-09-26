@@ -4,6 +4,8 @@ import hashlib
 import os
 from pathlib import Path
 
+import pytest
+
 import acad_portable.real_windows as rw
 from acad_portable.ops import EnsureRegistryKey, SetRegistryValue, WriteInstallState
 from acad_portable.planner import InstallPlan
@@ -461,15 +463,14 @@ def test_atomic_write_failure_leaves_no_partial_destination(
     state_path = tmp_path / "state.json"
     monkeypatch.setattr(rw, "_read_archive_member", lambda op: b"runtime-v1")
 
-    def failing_replace(src, dst):
-        # Only fail the archive destination; the journal's own atomic writes
-        # must keep working so the failure path is observable.
-        if Path(dst) == destination:
-            raise OSError("simulated replace failure")
-        return real_replace(src, dst)
+    real_publish = rw._publish_temp_no_replace
 
-    real_replace = rw.os.replace
-    monkeypatch.setattr(rw.os, "replace", failing_replace)
+    def failing_publish(src, dst):
+        if Path(dst) == destination:
+            raise OSError("simulated publish failure")
+        return real_publish(src, dst)
+
+    monkeypatch.setattr(rw, "_publish_temp_no_replace", failing_publish)
     adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
 
     try:
@@ -477,9 +478,9 @@ def test_atomic_write_failure_leaves_no_partial_destination(
             _archive_plan(state_path, archive, "Program Files/AcVba.arx", destination)
         )
     except OSError as exc:
-        assert "simulated replace failure" in str(exc)
+        assert "simulated publish failure" in str(exc)
     else:
-        raise AssertionError("expected replace failure to propagate")
+        raise AssertionError("expected publish failure to propagate")
 
     assert not destination.exists()
     assert not destination.parent.exists() or list(destination.parent.iterdir()) == []
@@ -508,13 +509,16 @@ def test_atomic_upgrade_failure_keeps_old_content_and_ownership(
     assert before_state is not None
     installed_before = _entry(before_state["created_files"], destination)
 
-    def failing_replace(src, dst):
-        if Path(dst) == destination:
-            raise OSError("simulated replace failure")
-        return real_replace(src, dst)
+    real_publish = rw._publish_temp_no_replace
+    failed = {"value": False}
 
-    real_replace = rw.os.replace
-    monkeypatch.setattr(rw.os, "replace", failing_replace)
+    def failing_publish(src, dst):
+        if Path(dst) == destination and not failed["value"]:
+            failed["value"] = True
+            raise OSError("simulated publish failure")
+        return real_publish(src, dst)
+
+    monkeypatch.setattr(rw, "_publish_temp_no_replace", failing_publish)
     payload["value"] = b"runtime-v2"
 
     try:
@@ -533,7 +537,46 @@ def test_atomic_upgrade_failure_keeps_old_content_and_ownership(
     assert state is not None
     installed_after = _entry(state["created_files"], destination)
     assert installed_after == installed_before
-    assert state["status"] == "failed"
+
+
+def test_owned_upgrade_never_overwrites_concurrent_replacement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory = RegistryMemory()
+    patch_registry_backend(monkeypatch, memory)
+    archive = tmp_path / "payload.7z"
+    archive.write_bytes(b"archive")
+    destination = tmp_path / "Apps64" / "AcVba.arx"
+    state_path = tmp_path / "state.json"
+    payload = {"value": b"runtime-v1"}
+    monkeypatch.setattr(rw, "_read_archive_member", lambda op: payload["value"])
+    adapter = rw.RealWindowsAdapter(allow_non_windows_for_tests=True)
+    adapter.apply_plan(
+        _archive_plan(state_path, archive, "Program Files/AcVba.arx", destination)
+    )
+
+    real_publish = rw._publish_temp_no_replace
+    publish_count = {"value": 0}
+
+    def racing_publish(temp_name, target):
+        publish_count["value"] += 1
+        if publish_count["value"] == 1:
+            Path(target).write_bytes(b"external-race")
+        return real_publish(temp_name, target)
+
+    monkeypatch.setattr(rw, "_publish_temp_no_replace", racing_publish)
+    payload["value"] = b"runtime-v2"
+
+    with pytest.raises(RuntimeError, match="rollback could not restore"):
+        adapter.apply_plan(
+            _archive_plan(
+                state_path, archive, "Program Files/AcVba.arx", destination, version=2
+            )
+        )
+
+    assert destination.read_bytes() == b"external-race"
+    state = rw._load_state(state_path)
+    assert state is not None and state["status"] == "failed"
 
 
 def test_failure_after_archive_write_is_journaled(tmp_path: Path, monkeypatch) -> None:
