@@ -165,7 +165,8 @@ def _uninstall(layout: PackageLayout, apply: bool) -> int:
         "UNINSTALL: "
         f"registry restored={report.registry_restored}, removed={report.registry_removed}, "
         f"shortcuts restored={report.shortcuts_restored}, removed={report.shortcuts_removed}, "
-        f"junctions removed={report.junctions_removed}, conflicts={len(report.conflicts)}"
+        f"files removed={report.files_removed}, junctions removed={report.junctions_removed}, "
+        f"conflicts={len(report.conflicts)}"
     )
     for conflict in report.conflicts:
         print(f"  CONFLICT: {conflict}")
@@ -183,8 +184,10 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
         "registry": {
             "same": report.registry_same,
             "change": report.registry_change,
+            "external_preserved": report.registry_external_preserved,
             "create": report.registry_create,
             "keys_create": report.registry_keys_create,
+            "retire": report.registry_retire,
         },
         "junctions": {
             "same": report.junction_same,
@@ -195,6 +198,14 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
             "existing": report.shortcut_existing,
             "create": report.shortcut_create,
         },
+        "files": {
+            "same": report.file_same,
+            "reuse": report.file_reuse,
+            "create": report.file_create,
+            "conflict": report.file_conflict,
+            "upgrade": report.file_upgrade,
+            "retire": report.file_retire,
+        },
         "details": list(report.details),
     }
     if as_json:
@@ -203,14 +214,22 @@ def _diff(layout: PackageLayout, as_json: bool) -> int:
         print(
             "Registry     : "
             f"same={report.registry_same} change={report.registry_change} "
-            f"create={report.registry_create} keys_create={report.registry_keys_create}"
+            f"external_preserved={report.registry_external_preserved} "
+            f"create={report.registry_create} keys_create={report.registry_keys_create} "
+            f"retire={report.registry_retire}"
         )
         print(
             "Junctions    : "
             f"same={report.junction_same} create={report.junction_create} conflict={report.junction_conflict}"
         )
         print(f"Shortcuts    : existing={report.shortcut_existing} create={report.shortcut_create}")
+        print(
+            "Files        : "
+            f"same={report.file_same} reuse={report.file_reuse} "
+            f"create={report.file_create} conflict={report.file_conflict} "
+            f"upgrade={report.file_upgrade} retire={report.file_retire}"
+        )
         for detail in report.details[:20]:
             print(f"  - {detail}")
-    return 0 if report.junction_conflict == 0 else 1
+    return 0 if report.junction_conflict == 0 and report.file_conflict == 0 else 1
 

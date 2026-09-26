@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,7 @@ from .ops import (
     EnsureDirectory,
     EnsureJunction,
     EnsureRegistryKey,
+    InstallArchiveFile,
     SetRegistryValue,
     WriteInstallState,
 )
@@ -19,6 +21,18 @@ from .planner import (
     HKCU_AUTOCAD,
     HKLM_AUTOCAD,
     InstallPlan,
+    VBA71_2052_FEATURE,
+    VBA71_2052_PACKED_PRODUCT,
+    VBA71_FEATURE,
+    VBA71_PACKED_PRODUCT,
+    VBA71_QUALIFIED_CATEGORY_PACKED,
+    VBA71_QUALIFIER_2052,
+    VBA_ENABLER_PACKED_PRODUCT,
+    VBA_MSI_ALLOWED_COMPONENT_CLIENTS,
+    VBA_MSI_CLIENT_VALUE_NAMES,
+    VBA_MSI_COMPONENT_CLIENT_ROOT,
+    VBA_MSI_REGISTRY_PREFIXES,
+    VBA_RUNTIME_REGISTRY_PREFIXES,
     registry_key_is_same_or_descendant,
 )
 
@@ -31,12 +45,31 @@ class PlanFinding:
 
 def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFinding, ...]:
     findings: list[PlanFinding] = []
+    vba_enabled = bool(plan.metadata.get("vba_enabled", False))
+    # Path identity is computed with ntpath and casefold so it stays valid when
+    # the audit runs on Linux against Windows-style plan data.
+    planned_files = {
+        _windows_path_key(operation.destination)
+        for operation in plan.operations
+        if isinstance(operation, InstallArchiveFile)
+    }
+    program_files_roots = _vba_allowed_file_roots(plan)
     allowed_roots = (
         HKCU_AUTOCAD.casefold(),
         HKLM_AUTOCAD.casefold(),
         *(prefix.casefold() for prefix in AUTOCAD_REG3_CORE_PREFIXES),
+        *(
+            (prefix.casefold() for prefix in VBA_RUNTIME_REGISTRY_PREFIXES)
+            if vba_enabled
+            else ()
+        ),
+        *(
+            (prefix.casefold() for prefix in VBA_MSI_REGISTRY_PREFIXES)
+            if vba_enabled
+            else ()
+        ),
     )
-    supported_registry_kinds = {"sz", "expand_sz", "dword"}
+    supported_registry_kinds = {"sz", "expand_sz", "dword", "multi_sz"}
 
     for warning in plan.warnings:
         findings.append(PlanFinding("PLAN_WARNING", warning))
@@ -49,10 +82,27 @@ def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFi
                 for root in allowed_roots
             ):
                 findings.append(PlanFinding("REGISTRY_ROOT", operation.key))
-            if "\\applications\\acadvba" in key_cf:
+            if "\\applications\\acadvba" in key_cf and not vba_enabled:
                 findings.append(PlanFinding("VBA_IN_CORE", operation.key))
             if registry_key_is_same_or_descendant(operation.key, HKCU_AUTOCAD) and "\\applications" in key_cf:
                 findings.append(PlanFinding("USER_PLUGIN_IN_CORE", operation.key))
+            if vba_enabled and any(
+                registry_key_is_same_or_descendant(operation.key, prefix)
+                for prefix in VBA_RUNTIME_REGISTRY_PREFIXES
+            ):
+                text = operation.key
+                if isinstance(operation, SetRegistryValue):
+                    text += f" {operation.name} {operation.data}"
+                lowered = text.casefold()
+                if "\\installer\\" in lowered or "\\classes\\installer\\" in lowered:
+                    findings.append(PlanFinding("VBA_INSTALLER_METADATA", operation.key))
+                if "fm20" in lowered or "microsoft forms" in lowered or "\\forms." in lowered:
+                    findings.append(PlanFinding("VBA_FORMS_IN_BASE", operation.key))
+            if vba_enabled and any(
+                registry_key_is_same_or_descendant(operation.key, prefix)
+                for prefix in VBA_MSI_REGISTRY_PREFIXES
+            ):
+                _check_vba_msi_identity(findings, operation)
 
         if isinstance(operation, SetRegistryValue):
             if operation.kind not in supported_registry_kinds:
@@ -74,7 +124,7 @@ def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFi
                         )
                         break
                 if operation.name.casefold() == "loader" and "\\applications\\" in operation.key.casefold():
-                    _check_loader(findings, operation.data, layout)
+                    _check_loader(findings, operation.data, layout, planned_files)
 
         if isinstance(operation, EnsureJunction):
             if operation.target != layout.chs:
@@ -95,11 +145,149 @@ def validate_core_plan(plan: InstallPlan, layout: PackageLayout) -> tuple[PlanFi
             if not operation.target.exists():
                 findings.append(PlanFinding("SHORTCUT_TARGET_MISSING", str(operation.target)))
 
+        if isinstance(operation, InstallArchiveFile):
+            if not vba_enabled:
+                findings.append(PlanFinding("VBA_FILE_WITHOUT_FEATURE", str(operation.destination)))
+            if operation.archive != layout.vba_archive:
+                findings.append(PlanFinding("VBA_ARCHIVE", str(operation.archive)))
+            _check_no_system_target(findings, operation.destination, "VBA_FILE_SYSTEM")
+            if not _destination_within_vba_root(operation, program_files_roots):
+                findings.append(PlanFinding("VBA_FILE_ROOT", str(operation.destination)))
+            member_cf = operation.member.replace("\\", "/").casefold()
+            if member_cf.startswith("windows/") or "/fm20" in member_cf:
+                findings.append(PlanFinding("VBA_FORMS_IN_BASE", operation.member))
+
         if isinstance(operation, WriteInstallState):
             if operation.path.parent != layout.acaoe:
                 findings.append(PlanFinding("STATE_LOCATION", str(operation.path)))
 
     return tuple(findings)
+
+
+def _check_vba_msi_identity(
+    findings: list[PlanFinding],
+    operation: EnsureRegistryKey | SetRegistryValue,
+) -> None:
+    from .planner import HKLM_INSTALLER_CLASSES, HKLM_INSTALLER_USERDATA_SYSTEM
+
+    key = operation.key.rstrip("\\")
+    key_cf = key.casefold()
+
+    empty_keys = {
+        rf"{HKLM_INSTALLER_CLASSES}\Products\{VBA_ENABLER_PACKED_PRODUCT}".casefold(),
+        rf"{HKLM_INSTALLER_CLASSES}\Products\{VBA71_PACKED_PRODUCT}".casefold(),
+        rf"{HKLM_INSTALLER_CLASSES}\Products\{VBA71_2052_PACKED_PRODUCT}".casefold(),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_PACKED_PRODUCT}".casefold(),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_2052_PACKED_PRODUCT}".casefold(),
+    }
+    feature_keys = {
+        rf"{HKLM_INSTALLER_CLASSES}\Features\{VBA71_PACKED_PRODUCT}".casefold(): VBA71_FEATURE,
+        rf"{HKLM_INSTALLER_CLASSES}\Features\{VBA71_2052_PACKED_PRODUCT}".casefold(): VBA71_2052_FEATURE,
+    }
+    userdata_leaf_keys = {
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_PACKED_PRODUCT}\Features".casefold(): (
+            VBA71_FEATURE,
+            "sz",
+        ),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_PACKED_PRODUCT}\InstallProperties".casefold(): (
+            "WindowsInstaller",
+            "dword",
+        ),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_PACKED_PRODUCT}\Usage".casefold(): (
+            VBA71_FEATURE,
+            "dword",
+        ),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_2052_PACKED_PRODUCT}\Features".casefold(): (
+            VBA71_2052_FEATURE,
+            "sz",
+        ),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_2052_PACKED_PRODUCT}\InstallProperties".casefold(): (
+            "WindowsInstaller",
+            "dword",
+        ),
+        rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_2052_PACKED_PRODUCT}\Usage".casefold(): (
+            VBA71_2052_FEATURE,
+            "dword",
+        ),
+    }
+    qualified_key = (
+        rf"{HKLM_INSTALLER_CLASSES}\Components\{VBA71_QUALIFIED_CATEGORY_PACKED}"
+    ).casefold()
+
+    if key_cf in empty_keys:
+        if isinstance(operation, SetRegistryValue):
+            findings.append(PlanFinding("VBA_MSI_UNEXPECTED_VALUE", operation.key))
+        return
+
+    if key_cf in feature_keys:
+        if isinstance(operation, SetRegistryValue):
+            expected = feature_keys[key_cf]
+            if not (
+                operation.name == expected
+                and operation.kind == "sz"
+                and operation.data == ""
+            ):
+                findings.append(
+                    PlanFinding(
+                        "VBA_MSI_FEATURE_VALUE",
+                        f"{operation.key} [{operation.name}]",
+                    )
+                )
+        return
+
+    if key_cf in userdata_leaf_keys:
+        if isinstance(operation, SetRegistryValue):
+            expected_name, expected_kind = userdata_leaf_keys[key_cf]
+            if operation.name != expected_name or operation.kind != expected_kind:
+                findings.append(
+                    PlanFinding(
+                        "VBA_MSI_USERDATA_VALUE",
+                        f"{operation.key} [{operation.name}] type={operation.kind}",
+                    )
+                )
+            if operation.name == "WindowsInstaller" and operation.data != 1:
+                findings.append(
+                    PlanFinding("VBA_MSI_WINDOWS_INSTALLER", str(operation.data))
+                )
+        return
+
+    if key_cf == qualified_key:
+        if isinstance(operation, SetRegistryValue):
+            if not (
+                operation.name == VBA71_QUALIFIER_2052
+                and operation.kind == "multi_sz"
+                and isinstance(operation.data, list)
+                and len(operation.data) == 1
+            ):
+                findings.append(
+                    PlanFinding(
+                        "VBA_MSI_QUALIFIED_VALUE",
+                        f"{operation.key} [{operation.name}] type={operation.kind}",
+                    )
+                )
+        return
+
+    component_prefix = VBA_MSI_COMPONENT_CLIENT_ROOT.rstrip("\\") + "\\"
+    if key_cf.startswith(component_prefix.casefold()):
+        tail = key[len(component_prefix):]
+        if not re.fullmatch(r"[0-9A-Fa-f]{32}", tail):
+            findings.append(PlanFinding("VBA_MSI_COMPONENT_KEY", operation.key))
+            return
+        expected_product = VBA_MSI_ALLOWED_COMPONENT_CLIENTS.get(tail.upper())
+        if expected_product is None:
+            findings.append(PlanFinding("VBA_MSI_COMPONENT_SCOPE", operation.key))
+            return
+        if isinstance(operation, SetRegistryValue):
+            if operation.name != expected_product or operation.kind != "sz":
+                findings.append(
+                    PlanFinding(
+                        "VBA_MSI_COMPONENT_VALUE",
+                        f"{operation.key} [{operation.name}] type={operation.kind}",
+                    )
+                )
+        return
+
+    findings.append(PlanFinding("VBA_MSI_SCOPE", operation.key))
 
 
 def _check_no_system_target(findings: list[PlanFinding], path: Path, code: str) -> None:
@@ -108,12 +296,73 @@ def _check_no_system_target(findings: list[PlanFinding], path: Path, code: str) 
         findings.append(PlanFinding(code, str(path)))
 
 
-def _check_loader(findings: list[PlanFinding], loader: str, layout: PackageLayout) -> None:
+def _windows_path_key(path: Path | str) -> str:
+    """Host-independent, separator- and case-insensitive path identity.
+
+    ``ntpath`` understands Windows drive/UNC semantics regardless of the OS
+    running the audit, so ``C:\\Program Files\\...`` is never mistaken for a
+    relative POSIX path.  ``normpath`` also collapses ``..`` segments before
+    containment is evaluated.
+    """
+    return ntpath.normpath(str(path).replace("/", "\\")).casefold()
+
+
+def _vba_allowed_file_roots(plan: InstallPlan) -> dict[str, str | None]:
+    """Map each supported archive member prefix to its configured root."""
+    program_files = plan.metadata.get("program_files")
+    program_files_x86 = plan.metadata.get("program_files_x86")
+    return {
+        "Program Files/": str(program_files) if program_files else None,
+        "Program Files (x86)/": (
+            str(program_files_x86) if program_files_x86 else None
+        ),
+    }
+
+
+def _is_within_root(path: Path | str, root: Path | str) -> bool:
+    """Lexical, component-boundary containment using Windows path semantics."""
+    candidate = _windows_path_key(path)
+    root_key = _windows_path_key(root)
+    return candidate == root_key or candidate.startswith(root_key + "\\")
+
+
+def _destination_within_vba_root(
+    operation: InstallArchiveFile,
+    roots: dict[str, str | None],
+) -> bool:
+    member = operation.member.replace("\\", "/")
+    expected_root: str | None = None
+    for prefix, configured in roots.items():
+        if member.startswith(prefix):
+            expected_root = configured
+            break
+    if expected_root is None:
+        # Unsupported member prefix: fail closed rather than guessing a root.
+        return False
+    return _is_within_root(operation.destination, expected_root)
+
+
+def _check_loader(
+    findings: list[PlanFinding],
+    loader: str,
+    layout: PackageLayout,
+    planned_files: set[str] | None = None,
+) -> None:
     if "://" in loader:
         return
-    candidate = Path(loader)
-    if not candidate.is_absolute():
+    # Windows absolute detection uses Windows semantics so a drive path is
+    # never appended to the (possibly POSIX) autocad_root on a Linux CI host.
+    # The native candidate is still built from the original loader string so
+    # that a real POSIX absolute path is checked with native existence and is
+    # not turned into a backslash filename that cannot exist.
+    windows_text = loader.replace("/", "\\")
+    if ntpath.isabs(windows_text) or ntpath.splitdrive(windows_text)[0]:
+        candidate = Path(loader)
+    else:
         candidate = layout.autocad_root / loader
-    if not candidate.exists():
-        findings.append(PlanFinding("LOADER_MISSING", str(candidate)))
+    if candidate.exists():
+        return
+    if planned_files and _windows_path_key(candidate) in planned_files:
+        return
+    findings.append(PlanFinding("LOADER_MISSING", str(candidate)))
 

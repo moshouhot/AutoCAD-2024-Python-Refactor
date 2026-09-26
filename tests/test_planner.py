@@ -4,12 +4,64 @@ from pathlib import Path
 
 import pytest
 
+from acad_portable.audit import validate_core_plan
 from acad_portable.model import PackageError, PackageLayout
-from acad_portable.ops import CreateShortcut, EnsureJunction, SetRegistryValue
-from acad_portable.planner import InstallPlanner, KnownFolders
+from acad_portable.ops import CreateShortcut, EnsureJunction, InstallArchiveFile, SetRegistryValue
+from acad_portable.planner import (
+    HKLM_INSTALLER_CLASSES,
+    HKLM_INSTALLER_USERDATA_SYSTEM,
+    InstallPlanner,
+    KnownFolders,
+    VBA71_2052_FEATURE,
+    VBA71_2052_PACKED_PRODUCT,
+    VBA71_2052_REQUIRED_COMPONENTS,
+    VBA71_FEATURE,
+    VBA71_FM20_PACKED_COMPONENT,
+    VBA71_PACKED_PRODUCT,
+    VBA71_QUALIFIED_CATEGORY_PACKED,
+    VBA71_QUALIFIER_2052,
+    VBA71_REQUIRED_COMPONENTS,
+    VBA_ENABLER_ACVBA_PACKED_COMPONENT,
+    VBA_ENABLER_PACKED_PRODUCT,
+    VBA_MSI_COMPONENT_CLIENT_ROOT,
+)
 
 
 REG_HEADER = "Windows Registry Editor Version 5.00\n\n"
+
+
+def _multi_sz_hex(*items: str) -> str:
+    raw = ("\x00".join(items) + "\x00\x00").encode("utf-16le")
+    return ",".join(f"{byte:02x}" for byte in raw)
+
+
+def append_vba_msi_fixture(layout: PackageLayout) -> None:
+    text = layout.vba_registry.read_text(encoding="utf-16")
+    component_rows: list[tuple[str, str, str]] = []
+    for packed_component in sorted(VBA71_REQUIRED_COMPONENTS):
+        if packed_component == VBA71_FM20_PACKED_COMPONENT:
+            data = r"C:\Windows\system32\FM20.DLL"
+        else:
+            data = rf"C:\Program Files\Common Files\Microsoft Shared\VBA\VBA7.1\{packed_component}.bin"
+        component_rows.append((packed_component, VBA71_PACKED_PRODUCT, data))
+    for packed_component in sorted(VBA71_2052_REQUIRED_COMPONENTS):
+        data = rf"C:\Program Files\Common Files\Microsoft Shared\VBA\VBA7.1\2052\{packed_component}.bin"
+        component_rows.append((packed_component, VBA71_2052_PACKED_PRODUCT, data))
+    parts = [
+        text,
+        f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products\\{VBA71_PACKED_PRODUCT}\\Features]\n"{VBA71_FEATURE}"="base-feature"\n''',
+        f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products\\{VBA71_PACKED_PRODUCT}\\Usage]\n"{VBA71_FEATURE}"=dword:00000001\n''',
+        f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products\\{VBA71_2052_PACKED_PRODUCT}\\Features]\n"{VBA71_2052_FEATURE}"="lang-feature"\n''',
+        f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products\\{VBA71_2052_PACKED_PRODUCT}\\Usage]\n"{VBA71_2052_FEATURE}"=dword:00000001\n''',
+    ]
+    for packed_component, packed_product, data in component_rows:
+        parts.append(
+            f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Components\\{packed_component}]\n"{packed_product}"="{data.replace(chr(92), chr(92) * 2)}"\n'''
+        )
+    parts.append(
+        f'''\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\Installer\\Components\\{VBA71_QUALIFIED_CATEGORY_PACKED}]\n"{VBA71_QUALIFIER_2052}"=hex(7):{_multi_sz_hex("descriptor")}\n'''
+    )
+    layout.vba_registry.write_text("".join(parts), encoding="utf-16")
 
 
 def make_package(root: Path) -> PackageLayout:
@@ -308,3 +360,293 @@ def test_planner_deleted_sections_do_not_influence_path_rebasing(tmp_path: Path)
         for old in plan.metadata["legacy_path_prefixes"]
     )
 
+
+def test_vba_base_plan_includes_minimal_msi_identity_and_excludes_untraced_installer_state(
+    tmp_path: Path,
+) -> None:
+    layout = make_package(tmp_path)
+    layout.config.write_text("桌面快捷方式=1\n安装 VBA编程=1\n", encoding="utf-8")
+    layout.vba_archive.parent.mkdir(parents=True, exist_ok=True)
+    layout.vba_archive.write_bytes(b"7z-placeholder")
+    layout.vba_registry.write_text(
+        REG_HEADER
+        + r'''[HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R24.3\AutoCAD 2024 VBA Enabler]
+"LangAbbrev"=""
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{2F967C44-B1F0-485E-957C-97538BCAD2DE}]
+@="Microsoft APC 7.1 Object Library"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{2F967C44-B1F0-485E-957C-97538BCAD2DE}\InprocServer32]
+@="C:\\Program Files\\Common Files\\Microsoft Shared\\VBA\\VBA7.1\\apc71.dll"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\MSAPC.ApcGlobal]
+@="Microsoft APC 7.1 Object Library"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\MSAPC.ApcGlobal\CurVer]
+@="MSAPC.ApcGlobal.7.1"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\TypeLib\{000204EF-0000-0000-C000-000000000046}\4.2\9\win64]
+@="C:\\PROGRA~1\\COMMON~1\\MICROS~1\\VBA\\VBA7.1\\VBE7.DLL"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\VBA]
+"Vbe71DllPath"="C:\\PROGRA~1\\COMMON~1\\MICROS~1\\VBA\\VBA7.1\\VBE7.DLL"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\VBA\VBA7.1\Install]
+@=dword:00000001
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\TypeLib\{0D452EE1-E08F-101A-852E-02608C4D0BB4}\2.0\0\win64]
+@="C:\\Windows\\system32\\FM20.DLL"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Installer\Products\FAKE]
+"ProductName"="Microsoft VBA 7.1"
+''',
+        encoding="utf-16",
+    )
+    append_vba_msi_fixture(layout)
+    windows_root = tmp_path / "Windows"
+    system32 = windows_root / "System32"
+    system32.mkdir(parents=True)
+    (system32 / "FM20.DLL").write_bytes(b"")
+    (system32 / "FM20chs.DLL").write_bytes(b"")
+    folders = KnownFolders(
+        user_profile=Path(r"C:\Users\Tester"),
+        appdata=Path(r"C:\Users\Tester\AppData\Roaming"),
+        local_appdata=Path(r"C:\Users\Tester\AppData\Local"),
+        desktop=Path(r"C:\Users\Tester\Desktop"),
+        windows=windows_root,
+        program_data=Path(r"C:\ProgramData"),
+        public=Path(r"C:\Users\Public"),
+        program_files=Path(r"C:\Program Files"),
+        program_files_x86=Path(r"C:\Program Files (x86)"),
+    )
+
+    plan = InstallPlanner(layout, folders).build()
+    files = [op for op in plan.operations if isinstance(op, InstallArchiveFile)]
+    values = [op for op in plan.operations if isinstance(op, SetRegistryValue)]
+
+    assert plan.metadata["vba_enabled"] is True
+    assert len(files) == 14
+    assert all("FM20" not in op.member.upper() for op in files)
+    assert all("\\Windows\\System32" not in str(op.destination) for op in files)
+    assert any("AcVBA2024.Bundle" in str(op.destination) for op in files)
+    assert any("VBA7.1" in str(op.destination) for op in files)
+    assert all(
+        op.reuse_existing
+        for op in files
+        if "Common Files" in op.member
+    )
+    assert all(
+        not op.reuse_existing
+        for op in files
+        if "AcVBA2024.Bundle" in op.member
+    )
+    assert any("\\Applications\\AcadVBA" in op.key for op in values)
+    acadvba_values = [
+        op for op in values if "\\applications\\acadvba" in op.key.casefold()
+    ]
+    assert acadvba_values
+    assert all(op.preserve_existing for op in acadvba_values)
+    assert any("MSAPC.ApcGlobal" in op.key for op in values)
+    assert any("SOFTWARE\\Microsoft\\VBA" in op.key for op in values)
+    assert all("\\Installer\\Products\\FAKE" not in op.key for op in values)
+    assert all("\\SourceList" not in op.key for op in values)
+    assert all(op.name not in {"LocalPackage", "InstallSource", "PackageCode"} for op in values)
+    assert all("0D452EE1-E08F-101A-852E-02608C4D0BB4" not in op.key for op in values)
+
+    component_values = [
+        op
+        for op in values
+        if op.key.casefold().startswith((VBA_MSI_COMPONENT_CLIENT_ROOT + "\\").casefold())
+    ]
+    assert all(op.preserve_existing for op in component_values)
+    assert {
+        (op.key.rsplit("\\", 1)[-1], op.name)
+        for op in component_values
+    } == (
+        {(VBA_ENABLER_ACVBA_PACKED_COMPONENT, VBA_ENABLER_PACKED_PRODUCT)}
+        | {(component, VBA71_PACKED_PRODUCT) for component in VBA71_REQUIRED_COMPONENTS}
+        | {
+            (component, VBA71_2052_PACKED_PRODUCT)
+            for component in VBA71_2052_REQUIRED_COMPONENTS
+        }
+    )
+    assert len(component_values) == (
+        1 + len(VBA71_REQUIRED_COMPONENTS) + len(VBA71_2052_REQUIRED_COMPONENTS)
+    )
+    # Exhaustive Feature-state A/B proved these two 2052 help components are
+    # not needed to make VBAIntl LOCAL or to satisfy qualified-component
+    # resolution.  Keep them out of the portable runtime identity.
+    assert all(
+        op.key.rsplit("\\", 1)[-1]
+        not in {
+            "510B39BF82203DD46BD61B5EDBCCC141",  # VBCN6.CHM
+            "81C4E51E4B74CD4498C9EB0AC0DDC578",  # FM20.CHM
+        }
+        for op in component_values
+    )
+    assert any(
+        op.key.endswith("\\" + VBA71_FM20_PACKED_COMPONENT)
+        and str(op.data).replace("/", "\\").lower().endswith(
+            r"\windows\system32\fm20.dll"
+        )
+        for op in component_values
+    )
+
+    assert any(
+        op.key.casefold()
+        == rf"{HKLM_INSTALLER_CLASSES}\Features\{VBA71_PACKED_PRODUCT}".casefold()
+        and op.name == VBA71_FEATURE
+        and op.data == ""
+        for op in values
+    )
+    assert any(
+        op.key.casefold()
+        == rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_PACKED_PRODUCT}\InstallProperties".casefold()
+        and op.name == "WindowsInstaller"
+        and op.data == 1
+        for op in values
+    )
+    qualified = next(
+        op
+        for op in values
+        if op.key.casefold()
+        == rf"{HKLM_INSTALLER_CLASSES}\Components\{VBA71_QUALIFIED_CATEGORY_PACKED}".casefold()
+        and op.name == VBA71_QUALIFIER_2052
+    )
+    assert qualified.kind == "multi_sz"
+    assert qualified.data == ["descriptor"]
+    assert qualified.preserve_existing is True
+    vbe_path = next(
+        op
+        for op in values
+        if op.key.endswith(r"SOFTWARE\Microsoft\VBA") and op.name == "Vbe71DllPath"
+    )
+    vbe_path_text = str(vbe_path.data).replace("/", "\\")
+    assert vbe_path_text.startswith(
+        r"C:\Program Files\Common Files\Microsoft Shared\VBA"
+    )
+    assert "PROGRA~1" not in vbe_path_text.upper()
+    assert vbe_path.preserve_existing is True
+    msi_values = [
+        op
+        for op in values
+        if "\\Installer\\" in op.key
+        or "\\CurrentVersion\\Installer\\UserData\\" in op.key
+    ]
+    assert msi_values
+    assert all(op.preserve_existing for op in msi_values)
+    assert validate_core_plan(plan, layout) == ()
+
+
+
+def test_planner_publishes_configured_program_files_roots(tmp_path: Path) -> None:
+    """The audit relies on these metadata roots instead of literal names."""
+    layout = make_package(tmp_path)
+    folders = KnownFolders(
+        user_profile=Path(r"C:\Users\Tester"),
+        appdata=Path(r"C:\Users\Tester\AppData\Roaming"),
+        local_appdata=Path(r"C:\Users\Tester\AppData\Local"),
+        desktop=Path(r"C:\Users\Tester\Desktop"),
+        windows=Path(r"C:\Windows"),
+        program_data=Path(r"C:\ProgramData"),
+        public=Path(r"C:\Users\Public"),
+        program_files=Path(r"D:\Apps64"),
+        program_files_x86=Path(r"D:\Apps32"),
+    )
+
+    plan = InstallPlanner(layout, folders).build()
+
+    assert plan.metadata["program_files"] == r"D:\Apps64"
+    assert plan.metadata["program_files_x86"] == r"D:\Apps32"
+
+
+# --- ProgramW6432: 32-bit Python on 64-bit Windows --------------------------
+
+
+def _clear_program_files_env(monkeypatch) -> None:
+    for name in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_known_folders_prefers_programw6432_for_native_root(monkeypatch) -> None:
+    """A 32-bit process must resolve the native 64-bit Program Files root.
+
+    Under WOW64, ``ProgramFiles`` points at ``C:\\Program Files (x86)`` while
+    ``ProgramW6432`` holds the real 64-bit root.  ``program_files`` must be
+    the native root and ``program_files_x86`` must stay on the x86 root.
+    """
+    _clear_program_files_env(monkeypatch)
+    monkeypatch.setenv("ProgramW6432", r"C:\Program Files")
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files (x86)")
+    monkeypatch.setenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
+
+    folders = KnownFolders.current()
+
+    assert folders.program_files == Path(r"C:\Program Files")
+    assert folders.program_files_x86 == Path(r"C:\Program Files (x86)")
+
+
+def test_known_folders_falls_back_to_programfiles_without_programw6432(monkeypatch) -> None:
+    """Without ``ProgramW6432`` the native root falls back to ``ProgramFiles``."""
+    _clear_program_files_env(monkeypatch)
+    monkeypatch.setenv("ProgramFiles", r"D:\Apps")
+    monkeypatch.setenv("ProgramFiles(x86)", r"D:\Apps32")
+
+    folders = KnownFolders.current()
+
+    assert folders.program_files == Path(r"D:\Apps")
+    assert folders.program_files_x86 == Path(r"D:\Apps32")
+
+
+def test_known_folders_never_uses_programw6432_as_x86_root(monkeypatch) -> None:
+    """The native root must never leak into the x86 root."""
+    _clear_program_files_env(monkeypatch)
+    monkeypatch.setenv("ProgramW6432", r"C:\Program Files")
+
+    folders = KnownFolders.current()
+
+    assert folders.program_files == Path(r"C:\Program Files")
+    # No x86 variables at all: the stable default is used, not ProgramW6432.
+    assert folders.program_files_x86 == Path(r"C:\Program Files (x86)")
+    assert folders.program_files_x86 != folders.program_files
+
+
+def test_known_folders_uses_sysnative_for_wow64_native_system32(monkeypatch) -> None:
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "x86")
+    monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "AMD64")
+
+    folders = KnownFolders.current()
+
+    assert folders.native_system32 == Path(r"C:\Windows\Sysnative")
+
+
+def test_known_folders_uses_system32_for_native_process(monkeypatch) -> None:
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+
+    folders = KnownFolders.current()
+
+    assert folders.native_system32 == Path(r"C:\Windows\System32")
+
+
+def test_known_folders_native_system32_preserves_native_test_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """POSIX CI temp roots must remain real filesystem paths, not NT strings."""
+    _clear_program_files_env(monkeypatch)
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+    windows_root = tmp_path / "Windows"
+    folders = KnownFolders(
+        user_profile=tmp_path / "User",
+        appdata=tmp_path / "AppData" / "Roaming",
+        local_appdata=tmp_path / "AppData" / "Local",
+        desktop=tmp_path / "Desktop",
+        windows=windows_root,
+        program_data=tmp_path / "ProgramData",
+        public=tmp_path / "Public",
+    )
+
+    assert folders.native_system32 == windows_root / "System32"

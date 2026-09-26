@@ -17,6 +17,8 @@ class PackageLayout:
     reg1: Path
     reg2: Path
     reg3: Path
+    vba_registry: Path
+    vba_archive: Path
     config: Path
     acad_exe: Path
     support_lsp: Path
@@ -56,6 +58,8 @@ class PackageLayout:
             reg1=acaoe / "reg1.dli",
             reg2=acaoe / "reg2.dli",
             reg3=acaoe / "reg3.dli",
+            vba_registry=acaoe / "vba.dli",
+            vba_archive=acaoe / "app" / "VBA.dll",
             config=acaoe / "配置.txt",
             acad_exe=autocad_root / "acad.exe",
             support_lsp=autocad_root / "Support" / "acad2024.lsp",

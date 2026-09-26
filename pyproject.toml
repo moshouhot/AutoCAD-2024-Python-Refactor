@@ -7,6 +7,7 @@ name = "acad-portable"
 version = "0.1.0"
 description = "AutoCAD 2024 portable environment reimplementation"
 requires-python = ">=3.11"
+dependencies = ["py7zr>=0.21"]
 
 [project.scripts]
 acad-portable = "acad_portable.cli:main"

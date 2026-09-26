@@ -136,6 +136,15 @@ def _parse_value(name: str, raw_data: str) -> RegistryValue:
         except (ValueError, UnicodeDecodeError):
             return RegistryValue(name=name, kind="hex(2)", data=payload, raw=raw_data)
         return RegistryValue(name=name, kind="expand_sz", data=value, raw=raw_data)
+    if data.lower().startswith("hex(7):"):
+        payload = data.split(":", 1)[1]
+        try:
+            raw_bytes = bytes(int(token, 16) for token in payload.split(",") if token.strip())
+            text = raw_bytes.decode("utf-16le")
+            value = [item for item in text.rstrip("\x00").split("\x00") if item]
+        except (ValueError, UnicodeDecodeError):
+            return RegistryValue(name=name, kind="hex(7)", data=payload, raw=raw_data)
+        return RegistryValue(name=name, kind="multi_sz", data=value, raw=raw_data)
     if data.lower().startswith("hex"):
         kind = data.split(":", 1)[0].lower()
         return RegistryValue(name=name, kind=kind, data=data.split(":", 1)[1] if ":" in data else "", raw=raw_data)

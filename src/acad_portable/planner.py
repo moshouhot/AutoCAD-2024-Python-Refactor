@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 from collections import Counter
@@ -13,10 +14,30 @@ from .ops import (
     EnsureDirectory,
     EnsureJunction,
     EnsureRegistryKey,
+    InstallArchiveFile,
     Operation,
     SetRegistryValue,
     WriteInstallState,
 )
+
+VBA_ARCHIVE_PASSWORD = "zzz"
+VBA_BASE_FILE_MEMBERS = (
+    "Program Files (x86)/Common Files/Microsoft Shared/VBA/VBA6/VBE6EXT.OLB",
+    "Program Files/Autodesk/ApplicationPlugins/AcVBA2024.Bundle/Contents/AcVba.arx",
+    "Program Files/Autodesk/ApplicationPlugins/AcVBA2024.Bundle/PackageContents.xml",
+    "Program Files/Autodesk/ApplicationPlugins/AcVBA2024.Bundle/vbaext.ico",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/1033/APC71ITL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/1033/VBE7INTL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/1033/VBEUIINTL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/2052/APC71ITL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/2052/VBE7INTL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/2052/VBEUIINTL.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/apc71.dll",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/VBE7.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/VBEUI.DLL",
+    "Program Files/Common Files/microsoft shared/VBA/VBA7.1/VBEUIRES.DLL",
+)
+
 from .registry import PathRebaser, RegistryDocument
 
 
@@ -30,9 +51,104 @@ HKCU_AUTOCAD = r"HKEY_CURRENT_USER\SOFTWARE\Autodesk\AutoCAD"
 HKLM_AUTOCAD = r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD"
 HKCU_CLASSES = r"HKEY_CURRENT_USER\SOFTWARE\Classes"
 HKLM_CLASSES = r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes"
+HKLM_INSTALLER_CLASSES = rf"{HKLM_CLASSES}\Installer"
+HKLM_INSTALLER_USERDATA_SYSTEM = (
+    r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer"
+    r"\UserData\S-1-5-18"
+)
 HISTORICAL_USER_RE = re.compile(r"(?i)[A-Z]:\\Users\\[^\\\";]+")
 AUTOCAD_MARKER = "\\autocad 2024"
 SUPPORTED_AUTOCAD_REGISTRY_VERSION = "R24.3"
+
+# These are not a copy of the captured MSI database.  They are the smallest
+# identities proven by live traces plus exhaustive Feature-state subset A/B.
+VBA_ENABLER_PACKED_PRODUCT = "FEE98B82551790401000FCF3A3907BD7"
+VBA_ENABLER_ACVBA_PACKED_COMPONENT = "1D675EEA61AA0264284CC69034C784FF"
+VBA71_PACKED_PRODUCT = "593A1E8712DFA994192A1653AB16216B"
+VBA71_FEATURE = "ProductFiles"
+VBA71_APC71_PACKED_COMPONENT = "029E703DA86A1D115B5B0006799C897E"
+VBA71_FORMS_TYPELIB_PACKED_COMPONENT = "2A8F3F35080EE3E48A4E69A1726B20C9"
+VBA71_VBE7_PACKED_COMPONENT = "374F999555861D6408391B4C361BEDB9"
+VBA71_VBE6EXT_PACKED_COMPONENT = "57634D5732AA1D11A9CC0006794C4E25"
+VBA71_VBEUIRES_PACKED_COMPONENT = "5CBA7A12F82110647A86699DF16FDE01"
+VBA71_VBEUI_PACKED_COMPONENT = "A022E749FB2D09D489BC901493B9A972"
+VBA71_FM20_PACKED_COMPONENT = "5E942FC614A302346AC6FAA0E9854C6F"
+VBA71_VBE_TYPELIB_PACKED_COMPONENT = "EB0C8A90D0D34D14FAB6CF05A69BBEF1"
+VBA71_OFFICE_TYPELIB_PACKED_COMPONENT = "FFC7844B38D726447AE1F693823C83FA"
+VBA71_REQUIRED_COMPONENTS = frozenset(
+    {
+        VBA71_APC71_PACKED_COMPONENT,
+        VBA71_FORMS_TYPELIB_PACKED_COMPONENT,
+        VBA71_VBE7_PACKED_COMPONENT,
+        VBA71_VBE6EXT_PACKED_COMPONENT,
+        VBA71_VBEUIRES_PACKED_COMPONENT,
+        VBA71_VBEUI_PACKED_COMPONENT,
+        VBA71_FM20_PACKED_COMPONENT,
+        VBA71_VBE_TYPELIB_PACKED_COMPONENT,
+        VBA71_OFFICE_TYPELIB_PACKED_COMPONENT,
+    }
+)
+VBA71_2052_PACKED_PRODUCT = "F08F9BBC40537524BA93F75042643985"
+VBA71_2052_FEATURE = "VBAIntl"
+VBA71_2052_APC71ITL_PACKED_COMPONENT = "0643BD6279CD7B24B99AA4C82D4EEDA9"
+VBA71_2052_VBE7INTL_PACKED_COMPONENT = "0D2DA5BFE4DC9EE4283A1EA565AA603C"
+VBA71_2052_VBEUIINTL_PACKED_COMPONENT = "F5514BB8B1BF6EC4BB1C3E2F13396476"
+VBA71_2052_FM20CHS_PACKED_COMPONENT = "B11D3083768E5A54383A19141825E48E"
+VBA71_2052_REQUIRED_COMPONENTS = frozenset(
+    {
+        VBA71_2052_APC71ITL_PACKED_COMPONENT,
+        VBA71_2052_VBE7INTL_PACKED_COMPONENT,
+        VBA71_2052_VBEUIINTL_PACKED_COMPONENT,
+        VBA71_2052_FM20CHS_PACKED_COMPONENT,
+    }
+)
+VBA71_QUALIFIED_CATEGORY_PACKED = "A60D248310600834EA5F102E00FE15AB"
+VBA71_QUALIFIER_2052 = "2052"
+
+VBA_MSI_COMPONENT_CLIENT_ROOT = rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Components"
+VBA_MSI_CLIENT_VALUE_NAMES = frozenset(
+    {VBA_ENABLER_PACKED_PRODUCT, VBA71_PACKED_PRODUCT, VBA71_2052_PACKED_PRODUCT}
+)
+VBA_MSI_ALLOWED_COMPONENT_CLIENTS = {
+    VBA_ENABLER_ACVBA_PACKED_COMPONENT: VBA_ENABLER_PACKED_PRODUCT,
+    **{component: VBA71_PACKED_PRODUCT for component in VBA71_REQUIRED_COMPONENTS},
+    **{
+        component: VBA71_2052_PACKED_PRODUCT
+        for component in VBA71_2052_REQUIRED_COMPONENTS
+    },
+}
+VBA_MSI_REGISTRY_PREFIXES = (
+    rf"{HKLM_INSTALLER_CLASSES}\Products\{VBA_ENABLER_PACKED_PRODUCT}",
+    rf"{HKLM_INSTALLER_CLASSES}\Products\{VBA71_PACKED_PRODUCT}",
+    rf"{HKLM_INSTALLER_CLASSES}\Features\{VBA71_PACKED_PRODUCT}",
+    rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_PACKED_PRODUCT}",
+    rf"{HKLM_INSTALLER_CLASSES}\Products\{VBA71_2052_PACKED_PRODUCT}",
+    rf"{HKLM_INSTALLER_CLASSES}\Features\{VBA71_2052_PACKED_PRODUCT}",
+    rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{VBA71_2052_PACKED_PRODUCT}",
+    rf"{HKLM_INSTALLER_CLASSES}\Components\{VBA71_QUALIFIED_CATEGORY_PACKED}",
+    VBA_MSI_COMPONENT_CLIENT_ROOT,
+)
+
+VBA_RUNTIME_REGISTRY_PREFIXES = (
+    r"HKEY_LOCAL_MACHINE\SOFTWARE\Autodesk\AutoCAD\R24.3\AutoCAD 2024 VBA Enabler",
+    rf"{HKLM_CLASSES}\CLSID\{{2F967C44-B1F0-485E-957C-97538BCAD2DE}}",
+    rf"{HKLM_CLASSES}\CLSID\{{943FA227-E90C-47DA-987B-C4DD13E48CB4}}",
+    rf"{HKLM_CLASSES}\CLSID\{{95C9DCCD-A44A-4034-84BB-D7912DF5711F}}",
+    rf"{HKLM_CLASSES}\CLSID\{{CFE9F29B-E1B6-4240-AED7-360846769314}}",
+    rf"{HKLM_CLASSES}\TypeLib\{{000204EF-0000-0000-C000-000000000046}}",
+    rf"{HKLM_CLASSES}\TypeLib\{{0002E157-0000-0000-C000-000000000046}}",
+    rf"{HKLM_CLASSES}\TypeLib\{{2DF8D04C-5BFA-101B-BDE5-00AA0044DE52}}",
+    rf"{HKLM_CLASSES}\TypeLib\{{A6128B1F-4A3A-40B6-B5CE-5FE8DE3D88E9}}",
+    rf"{HKLM_CLASSES}\MSAPC.Apc",
+    rf"{HKLM_CLASSES}\MSAPC.Apc.7.1",
+    rf"{HKLM_CLASSES}\MSAPC.ApcCollection",
+    rf"{HKLM_CLASSES}\MSAPC.ApcCollection.7.1",
+    rf"{HKLM_CLASSES}\MSAPC.ApcGlobal",
+    rf"{HKLM_CLASSES}\MSAPC.ApcGlobal.7.1",
+    rf"{HKLM_CLASSES}\MSAPC.ApcHostAddIns",
+    rf"{HKLM_CLASSES}\MSAPC.ApcHostAddIns.7.1",
+    r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\VBA",
+)
 
 AUTOCAD_APPLICATION_COM_PREFIXES = (
     rf"{HKCU_CLASSES}\AutoCAD.Application",
@@ -73,6 +189,39 @@ class KnownFolders:
     windows: Path
     program_data: Path
     public: Path
+    program_files: Path = Path(r"C:\Program Files")
+    program_files_x86: Path = Path(r"C:\Program Files (x86)")
+
+    @property
+    def native_system32(self) -> Path:
+        """Return the native 64-bit system directory under WOW64.
+
+        A 32-bit process on 64-bit Windows is redirected from ``System32`` to
+        ``SysWOW64``.  Windows exposes ``Sysnative`` specifically so a WOW64
+        process can address the native 64-bit directory.  The paired
+        environment variables are the documented signal that the current
+        process is 32-bit on a 64-bit host; normal 64-bit processes continue
+        to use ``System32`` directly.
+        """
+        architecture = os.environ.get("PROCESSOR_ARCHITECTURE", "").casefold()
+        wow64_architecture = os.environ.get("PROCESSOR_ARCHITEW6432")
+        leaf = (
+            "Sysnative"
+            if wow64_architecture and architecture in {"x86", "i386", "i686"}
+            else "System32"
+        )
+
+        # The package is Windows-only, but planner tests also run on POSIX CI.
+        # When a Windows-looking root such as ``C:\\Windows`` is represented by
+        # a POSIX ``Path``, using ``/`` would create ``C:\\Windows/System32``.
+        # Use Windows lexical joining only for roots that actually carry a
+        # Windows drive/UNC share.  Real POSIX roots used by tests (for example
+        # ``/tmp/.../Windows``) must keep native joining so filesystem probes
+        # such as FM20 dependency checks still address the real temp tree.
+        windows_text = str(self.windows)
+        if ntpath.splitdrive(windows_text)[0]:
+            return Path(ntpath.join(windows_text, leaf))
+        return self.windows / leaf
 
     @classmethod
     def current(cls) -> "KnownFolders":
@@ -82,8 +231,21 @@ class KnownFolders:
         windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
         program_data = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
         public = Path(os.environ.get("PUBLIC", str(user.parent / "Public")))
+        # A 32-bit Python process on 64-bit Windows sees ``ProgramFiles`` as
+        # the x86 root; ``ProgramW6432`` is the native 64-bit root.  Prefer it
+        # for ``program_files`` and never use it as the x86 root.
+        program_files = Path(
+            os.environ.get("ProgramW6432")
+            or os.environ.get("ProgramFiles")
+            or r"C:\Program Files"
+        )
+        program_files_x86 = Path(
+            os.environ.get("ProgramFiles(x86)")
+            or os.environ.get("ProgramFiles")
+            or r"C:\Program Files (x86)"
+        )
         desktop = _desktop_folder(user)
-        return cls(user, appdata, local, desktop, windows, program_data, public)
+        return cls(user, appdata, local, desktop, windows, program_data, public, program_files, program_files_x86)
 
 
 @dataclass(frozen=True)
@@ -128,6 +290,26 @@ class InstallPlanner:
         operations.extend(self._registry_ops(reg2, HKLM_AUTOCAD, rebaser, warnings, source="reg2"))
         operations.extend(self._reg3_core_ops(reg3, rebaser, warnings))
 
+        vba_enabled = config.enabled("安装 VBA编程", default=False)
+        if vba_enabled:
+            if not self.layout.vba_archive.is_file():
+                raise PackageError(f"VBA archive not found: {self.layout.vba_archive}")
+            if not self.layout.vba_registry.is_file():
+                raise PackageError(f"VBA registry template not found: {self.layout.vba_registry}")
+            vba_registry = RegistryDocument.load(self.layout.vba_registry)
+            operations.extend(self._vba_file_ops())
+            operations.extend(self._vba_acad_registry_ops(reg2, rebaser, warnings))
+            operations.extend(self._vba_runtime_registry_ops(vba_registry, warnings))
+            operations.extend(self._vba_msi_identity_ops(vba_registry))
+            for shared_dependency in (
+                self.folders.native_system32 / "FM20.DLL",
+                self.folders.native_system32 / "FM20chs.DLL",
+            ):
+                if not shared_dependency.is_file():
+                    warnings.append(
+                        f"Required VBA shared dependency missing: {shared_dependency}"
+                    )
+
         local_product = self.folders.local_appdata / "Autodesk" / product_name / version
         roaming_product = self.folders.appdata / "Autodesk" / product_name / version
         for parent in (local_product, roaming_product):
@@ -168,8 +350,336 @@ class InstallPlanner:
                 "autocad_root": str(self.layout.autocad_root),
                 "desktop_shortcut": config.enabled("桌面快捷方式", default=True),
                 "desktop": str(self.folders.desktop),
+                "vba_enabled": vba_enabled,
+                # Explicit allowed file roots for the VBA payload.  The audit
+                # validates destinations against these instead of hard-coding
+                # the literal "Program Files" directory names, so relocated or
+                # renamed program-files folders stay valid.
+                "program_files": str(self.folders.program_files),
+                "program_files_x86": str(self.folders.program_files_x86),
             },
         )
+
+    def _vba_file_ops(self) -> list[Operation]:
+        ops: list[Operation] = []
+        for member in VBA_BASE_FILE_MEMBERS:
+            if member.startswith("Program Files (x86)/"):
+                relative = member.removeprefix("Program Files (x86)/")
+                destination = self.folders.program_files_x86 / Path(relative)
+            elif member.startswith("Program Files/"):
+                relative = member.removeprefix("Program Files/")
+                destination = self.folders.program_files / Path(relative)
+            else:
+                raise PackageError(f"unsupported VBA payload destination: {member}")
+            ops.append(
+                InstallArchiveFile(
+                    archive=self.layout.vba_archive,
+                    member=member,
+                    destination=destination,
+                    password=VBA_ARCHIVE_PASSWORD,
+                    reuse_existing=(
+                        member.startswith("Program Files/Common Files/")
+                        or member.startswith("Program Files (x86)/Common Files/")
+                    ),
+                )
+            )
+        return ops
+
+    def _vba_msi_identity_ops(self, document: RegistryDocument) -> list[Operation]:
+        """Publish only the MSI identity proven necessary by VBA live traces.
+
+        Deliberately excluded: SourceList, LocalPackage, InstallSource,
+        Uninstall metadata, package codes, cached MSI state, and broad Forms
+        registration/deployment.  The single FM20 component identity below is
+        retained because trace8 observed VBE7 requesting it directly; the
+        installer still does not copy or overwrite FM20.DLL in System32.
+        """
+        ops: list[Operation] = []
+
+        # AutoCAD's VBA loader checks the VBA Enabler ProductCode through MSI.
+        # Live A/B proved that the empty advertised product identity is enough.
+        ops.append(
+            EnsureRegistryKey(
+                rf"{HKLM_INSTALLER_CLASSES}\Products\{VBA_ENABLER_PACKED_PRODUCT}"
+            )
+        )
+        enabler_component_key = (
+            rf"{VBA_MSI_COMPONENT_CLIENT_ROOT}\{VBA_ENABLER_ACVBA_PACKED_COMPONENT}"
+        )
+        enabler_loader = (
+            self.folders.program_files
+            / "Autodesk"
+            / "ApplicationPlugins"
+            / "AcVBA2024.Bundle"
+            / "Contents"
+            / "AcVba.arx"
+        )
+        ops.append(EnsureRegistryKey(enabler_component_key))
+        ops.append(
+            SetRegistryValue(
+                enabler_component_key,
+                VBA_ENABLER_PACKED_PRODUCT,
+                "sz",
+                str(enabler_loader),
+                preserve_existing=True,
+            )
+        )
+
+        ops.extend(
+            self._vba_msi_product_identity_ops(
+                document,
+                packed_product=VBA71_PACKED_PRODUCT,
+                feature=VBA71_FEATURE,
+                required_components=VBA71_REQUIRED_COMPONENTS,
+            )
+        )
+        ops.extend(
+            self._vba_msi_product_identity_ops(
+                document,
+                packed_product=VBA71_2052_PACKED_PRODUCT,
+                feature=VBA71_2052_FEATURE,
+                required_components=VBA71_2052_REQUIRED_COMPONENTS,
+            )
+        )
+
+        qualified_key = (
+            rf"{HKLM_INSTALLER_CLASSES}\Components\{VBA71_QUALIFIED_CATEGORY_PACKED}"
+        )
+        qualified = self._required_registry_value(
+            document,
+            qualified_key,
+            VBA71_QUALIFIER_2052,
+            "multi_sz",
+        )
+        if not isinstance(qualified, list) or len(qualified) != 1:
+            raise PackageError(
+                "Unexpected VBA 2052 qualified-component descriptor: "
+                f"{qualified!r}"
+            )
+        ops.append(EnsureRegistryKey(qualified_key))
+        ops.append(
+            SetRegistryValue(
+                qualified_key,
+                VBA71_QUALIFIER_2052,
+                "multi_sz",
+                list(qualified),
+                preserve_existing=True,
+            )
+        )
+        return ops
+
+    def _vba_msi_product_identity_ops(
+        self,
+        document: RegistryDocument,
+        *,
+        packed_product: str,
+        feature: str,
+        required_components: frozenset[str],
+    ) -> list[Operation]:
+        classes_product = rf"{HKLM_INSTALLER_CLASSES}\Products\{packed_product}"
+        classes_feature = rf"{HKLM_INSTALLER_CLASSES}\Features\{packed_product}"
+        userdata_product = rf"{HKLM_INSTALLER_USERDATA_SYSTEM}\Products\{packed_product}"
+        userdata_features = userdata_product + r"\Features"
+        userdata_install_properties = userdata_product + r"\InstallProperties"
+        userdata_usage = userdata_product + r"\Usage"
+
+        feature_data = self._required_registry_value(
+            document, userdata_features, feature, "sz"
+        )
+        usage_data = self._required_registry_value(
+            document, userdata_usage, feature, "dword"
+        )
+
+        ops: list[Operation] = [
+            EnsureRegistryKey(classes_product),
+            EnsureRegistryKey(classes_feature),
+            SetRegistryValue(
+                classes_feature,
+                feature,
+                "sz",
+                "",
+                preserve_existing=True,
+            ),
+            EnsureRegistryKey(userdata_product),
+            EnsureRegistryKey(userdata_features),
+            SetRegistryValue(
+                userdata_features,
+                feature,
+                "sz",
+                feature_data,
+                preserve_existing=True,
+            ),
+            EnsureRegistryKey(userdata_install_properties),
+            SetRegistryValue(
+                userdata_install_properties,
+                "WindowsInstaller",
+                "dword",
+                1,
+                preserve_existing=True,
+            ),
+            EnsureRegistryKey(userdata_usage),
+            SetRegistryValue(
+                userdata_usage,
+                feature,
+                "dword",
+                usage_data,
+                preserve_existing=True,
+            ),
+        ]
+
+        component_rows: list[tuple[str, str]] = []
+        prefix = VBA_MSI_COMPONENT_CLIENT_ROOT + "\\"
+        for section in document.sections:
+            if section.deleted or not section.key.casefold().startswith(prefix.casefold()):
+                continue
+            packed_component = section.key[len(prefix):]
+            if not packed_component or "\\" in packed_component:
+                continue
+            if packed_component not in required_components:
+                continue
+            for value in section.values:
+                if value.name != packed_product or value.kind != "sz":
+                    continue
+                component_rows.append(
+                    (section.key, self._rebase_vba_path(str(value.data)))
+                )
+
+        found_components = {key.rsplit("\\", 1)[-1] for key, _data in component_rows}
+        if found_components != set(required_components):
+            raise PackageError(
+                f"Missing VBA MSI components for {packed_product}: "
+                f"found={sorted(found_components)!r} expected={sorted(required_components)!r}"
+            )
+        for key, data in sorted(component_rows, key=lambda row: row[0].casefold()):
+            ops.append(EnsureRegistryKey(key))
+            ops.append(
+                SetRegistryValue(
+                    key,
+                    packed_product,
+                    "sz",
+                    data,
+                    preserve_existing=True,
+                )
+            )
+        return ops
+
+    @staticmethod
+    def _required_registry_value(
+        document: RegistryDocument,
+        key: str,
+        name: str,
+        kind: str,
+    ) -> object:
+        for section in document.sections:
+            if section.deleted or section.key.casefold() != key.casefold():
+                continue
+            for value in section.values:
+                if value.name == name and value.kind == kind:
+                    return value.data
+        raise PackageError(
+            f"Required VBA registry value missing: {key} [{name}] type={kind}"
+        )
+
+    def _vba_runtime_registry_ops(
+        self,
+        document: RegistryDocument,
+        warnings: list[str],
+    ) -> list[Operation]:
+        ops: list[Operation] = []
+        for section in document.sections:
+            if section.deleted or not any(
+                registry_key_is_same_or_descendant(section.key, prefix)
+                for prefix in VBA_RUNTIME_REGISTRY_PREFIXES
+            ):
+                continue
+            ops.append(EnsureRegistryKey(section.key))
+            for value in section.values:
+                if value.kind == "delete":
+                    continue
+                if value.kind not in {"sz", "dword"}:
+                    warnings.append(
+                        f"Unsupported VBA registry value: {section.key} [{value.name}] type={value.kind}"
+                    )
+                    continue
+                data = value.data
+                if value.kind == "sz":
+                    data = self._rebase_vba_path(str(value.data))
+                ops.append(
+                    SetRegistryValue(
+                        section.key,
+                        value.name,
+                        value.kind,
+                        data,
+                        preserve_existing=True,
+                    )
+                )
+        return ops
+
+    def _rebase_vba_path(self, value: str) -> str:
+        mappings = (
+            (
+                r"C:\PROGRA~1\COMMON~1\MICROS~1\VBA",
+                str(self.folders.program_files / "Common Files" / "Microsoft Shared" / "VBA"),
+            ),
+            (
+                r"C:\Program Files\Common Files\Microsoft Shared\VBA",
+                str(self.folders.program_files / "Common Files" / "Microsoft Shared" / "VBA"),
+            ),
+            (
+                r"C:\Program Files (x86)\Common Files\Microsoft Shared\VBA",
+                str(self.folders.program_files_x86 / "Common Files" / "Microsoft Shared" / "VBA"),
+            ),
+            (
+                r"C:\Windows",
+                str(self.folders.windows),
+            ),
+        )
+        return PathRebaser(list(mappings)).apply(value)
+
+    def _vba_acad_registry_ops(
+        self,
+        document: RegistryDocument,
+        rebaser: PathRebaser,
+        warnings: list[str],
+    ) -> list[Operation]:
+        """Plan the AcadVBA application entry from the AutoCAD registry files.
+
+        Every value is planned with ``preserve_existing=True``: an external
+        value already present on the machine is never taken over on first
+        install, while values we create stay installer-owned and can still be
+        updated by a later upgrade (ownership is tracked in the journal, not
+        by this flag).
+        """
+        ops: list[Operation] = []
+        for section in document.sections:
+            if section.deleted:
+                continue
+            key_cf = section.key.casefold()
+            if not registry_key_is_same_or_descendant(section.key, HKLM_AUTOCAD):
+                continue
+            if "\\applications\\acadvba" not in key_cf:
+                continue
+            ops.append(EnsureRegistryKey(section.key))
+            for value in section.values:
+                if value.kind == "delete":
+                    continue
+                data = value.data
+                if value.kind in {"sz", "expand_sz"}:
+                    data = rebaser.apply(str(value.data))
+                    if self._contains_historical_package_path(str(data), rebaser):
+                        warnings.append(
+                            f"Unresolved legacy VBA path: {section.key} [{value.name}] -> {data}"
+                        )
+                ops.append(
+                    SetRegistryValue(
+                        section.key,
+                        value.name,
+                        value.kind,
+                        data,
+                        preserve_existing=True,
+                    )
+                )
+        return ops
 
     def _reg3_core_ops(
         self,
